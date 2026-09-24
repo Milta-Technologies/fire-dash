@@ -1,0 +1,32 @@
+{
+  "apps": [
+    {
+      "name": "api-service",
+      "script": "node server.js",
+      "cwd": "./server",
+      "env": {
+        "NODE_ENV": "production",
+        "PORT": "3000"
+      },
+      "watch": "./server/src",
+      "restart_sec": 2,
+      "scope": "user"
+    },
+    {
+      "name": "worker-queue",
+      "script": "/usr/bin/python3 -m worker.main",
+      "cwd": "./worker",
+      "env": {
+        "WORKER_CONCURRENCY": "4"
+      },
+      "restart_sec": 3,
+      "scope": "user"
+    },
+    {
+      "name": "metrics-agent",
+      "script": "./bin/metrics --interval 5",
+      "watch": "./bin/metrics",
+      "restart_sec": 5
+    }
+  ]
+}
