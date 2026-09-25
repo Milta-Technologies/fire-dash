@@ -249,11 +249,12 @@ static void render_detail_inspector(ScreenBuffer *sb, TUIState *state, LogLine *
         sb_printf(sb, " \033[38;5;51;1m[PARSED JSON STRUCTURE]\033[0m\033[K\r\n");
         printed_rows++;
 
-        char *line = strtok(pretty_json, "\r\n");
+        char *saveptr = NULL;
+        char *line = strtok_r(pretty_json, "\r\n", &saveptr);
         while (line && printed_rows < content_rows) {
             sb_printf(sb, "   \033[38;5;141m%.*s\033[0m\033[K\r\n", cols - 6, line);
             printed_rows++;
-            line = strtok(NULL, "\r\n");
+            line = strtok_r(NULL, "\r\n", &saveptr);
         }
         cJSON_free(pretty_json);
     }
@@ -273,6 +274,39 @@ static void render_detail_inspector(ScreenBuffer *sb, TUIState *state, LogLine *
     } else {
         sb_printf(sb, " \033[38;5;244m[m] Insert Marker Below  [c] Copy to Clipboard  [↑/k] Prev Line  [↓/j] Next Line  [Esc/Enter/q] Close\033[0m\033[K");
     }
+}
+
+static void update_matching_indices(TUIState *state) {
+    LogViewer *lv = &state->log_viewer;
+    if (!lv->is_dirty) return;
+
+    state->match_count = 0;
+    for (int i = 0; i < lv->count; i++) {
+        int real_idx = (lv->head + i) % MAX_LOG_LINES;
+        LogLine *ll = &lv->lines[real_idx];
+
+        if (ll->is_marker) {
+            state->matching_indices[state->match_count++] = real_idx;
+            continue;
+        }
+
+        if (lv->level_filter == LOG_LEVEL_ERR_ONLY && !ll->is_err) {
+            continue;
+        }
+        if (lv->level_filter == LOG_LEVEL_WARN_ERR && !ll->is_err && !ll->is_warn) {
+            continue;
+        }
+
+        if (lv->search_filter[0]) {
+            if (strcasestr(ll->text, lv->search_filter) == NULL &&
+                strcasestr(ll->app_name, lv->search_filter) == NULL) {
+                continue;
+            }
+        }
+
+        state->matching_indices[state->match_count++] = real_idx;
+    }
+    lv->is_dirty = false;
 }
 
 static void render_dashboard(TUIState *state, ProcessInfo *apps, int app_count) {
@@ -305,35 +339,10 @@ static void render_dashboard(TUIState *state, ProcessInfo *apps, int app_count) 
     int total_items = app_count + 1;
     LogViewer *lv = &state->log_viewer;
 
-    /* Collect filtered line indices */
-    int matching_indices[MAX_LOG_LINES];
-    int match_count = 0;
-
-    for (int i = 0; i < lv->count; i++) {
-        int real_idx = (lv->head + i) % MAX_LOG_LINES;
-        LogLine *ll = &lv->lines[real_idx];
-
-        if (ll->is_marker) {
-            matching_indices[match_count++] = real_idx;
-            continue;
-        }
-
-        if (lv->level_filter == LOG_LEVEL_ERR_ONLY && !ll->is_err) {
-            continue;
-        }
-        if (lv->level_filter == LOG_LEVEL_WARN_ERR && !ll->is_err && !ll->is_warn) {
-            continue;
-        }
-
-        if (lv->search_filter[0]) {
-            if (strcasestr(ll->text, lv->search_filter) == NULL &&
-                strcasestr(ll->app_name, lv->search_filter) == NULL) {
-                continue;
-            }
-        }
-
-        matching_indices[match_count++] = real_idx;
-    }
+    /* Collect filtered line indices using cache */
+    update_matching_indices(state);
+    int *matching_indices = state->matching_indices;
+    int match_count = state->match_count;
 
     /* If Log Detail Inspector is open */
     if (state->show_detail && state->selected_log_idx >= 0 && state->selected_log_idx < match_count) {
@@ -684,27 +693,10 @@ int tui_run(SystemdScope scope) {
                 int total_items = app_count + 1;
                 LogViewer *lv = &state.log_viewer;
 
-                /* Compute matching indices for current frame */
-                int matching_indices[MAX_LOG_LINES];
-                int match_count = 0;
-                for (int i = 0; i < lv->count; i++) {
-                    int real_idx = (lv->head + i) % MAX_LOG_LINES;
-                    LogLine *ll = &lv->lines[real_idx];
-
-                    if (ll->is_marker) {
-                        matching_indices[match_count++] = real_idx;
-                        continue;
-                    }
-                    if (lv->level_filter == LOG_LEVEL_ERR_ONLY && !ll->is_err) continue;
-                    if (lv->level_filter == LOG_LEVEL_WARN_ERR && !ll->is_err && !ll->is_warn) continue;
-                    if (lv->search_filter[0]) {
-                        if (strcasestr(ll->text, lv->search_filter) == NULL &&
-                            strcasestr(ll->app_name, lv->search_filter) == NULL) {
-                            continue;
-                        }
-                    }
-                    matching_indices[match_count++] = real_idx;
-                }
+                /* Compute matching indices for current frame using cache */
+                update_matching_indices(&state);
+                int *matching_indices = state.matching_indices;
+                int match_count = state.match_count;
 
                 /* 1. If Log Detail Inspector is currently open */
                 if (state.show_detail) {
@@ -800,7 +792,7 @@ int tui_run(SystemdScope scope) {
                         set_status(&state, "Inserted visual checkpoint marker");
                     }
                 } else if (c == 'l' || c == 'L') {
-                    state.log_viewer.level_filter = (state.log_viewer.level_filter + 1) % 3;
+                    log_viewer_set_level_filter(&state.log_viewer, (state.log_viewer.level_filter + 1) % 3);
                     state.selected_log_idx = -1;
                     set_status(&state, "Log Triage Filter: %s", log_viewer_level_name(state.log_viewer.level_filter));
                 } else if (c == 'a' || c == 'A') {

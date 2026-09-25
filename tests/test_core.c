@@ -85,10 +85,13 @@ static void test_log_viewer_core(void) {
     assert(lv.level_filter == LOG_LEVEL_ALL);
     assert(lv.auto_scroll == true);
     assert(lv.is_paused == false);
+    assert(lv.is_dirty == true);
 
     /* Test appending lines with auto severity detection */
+    lv.is_dirty = false;
     log_viewer_append(&lv, "2026-09-26T03:00:00Z GET /api/v1/health 200 OK", false);
     assert(lv.count == 1);
+    assert(lv.is_dirty == true);
     assert(lv.lines[0].is_err == false);
     assert(lv.lines[0].is_warn == false);
 

@@ -25,6 +25,8 @@ typedef struct {
     time_t status_msg_time;
     SystemdScope scope;
     LogViewer log_viewer;
+    int matching_indices[MAX_LOG_LINES];
+    int match_count;
     bool should_quit;
 } TUIState;
 

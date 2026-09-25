@@ -364,7 +364,8 @@ int systemd_get_unit_status(const char *name, SystemdScope scope, ProcessInfo *i
         return -1;
     }
 
-    char *line = strtok(output, "\r\n");
+    char *saveptr = NULL;
+    char *line = strtok_r(output, "\r\n", &saveptr);
     while (line) {
         char *eq = strchr(line, '=');
         if (eq) {
@@ -388,7 +389,7 @@ int systemd_get_unit_status(const char *name, SystemdScope scope, ProcessInfo *i
                 if (strcmp(val, "enabled") == 0) info->enabled = true;
             }
         }
-        line = strtok(NULL, "\r\n");
+        line = strtok_r(NULL, "\r\n", &saveptr);
     }
     free(output);
 
@@ -419,7 +420,76 @@ int systemd_list_all(SystemdScope scope, ProcessInfo **out_list, int *out_count)
     }
 
     for (int i = 0; i < count; i++) {
-        systemd_get_unit_status(names[i], scope, &list[i]);
+        snprintf(list[i].name, sizeof(list[i].name), "%s", names[i]);
+        snprintf(list[i].unit_name, sizeof(list[i].unit_name), "%s%s.service", FIRE_UNIT_PREFIX, names[i]);
+        list[i].scope = scope;
+        snprintf(list[i].active_state, sizeof(list[i].active_state), "inactive");
+        snprintf(list[i].sub_state, sizeof(list[i].sub_state), "dead");
+        list[i].has_watch = unit_gen_has_watch(names[i], scope, list[i].watch_path, sizeof(list[i].watch_path));
+    }
+
+    /* Batch query all units in a single systemctl show call */
+    char cmd[4096];
+    size_t cmd_len = snprintf(cmd, sizeof(cmd), "systemctl %s show ", scope == SCOPE_USER ? "--user" : "");
+    for (int i = 0; i < count && cmd_len + strlen(list[i].unit_name) + 2 < sizeof(cmd) - 150; i++) {
+        cmd_len += snprintf(cmd + cmd_len, sizeof(cmd) - cmd_len, "%s ", list[i].unit_name);
+    }
+    snprintf(cmd + cmd_len, sizeof(cmd) - cmd_len,
+             "-p Id,ActiveState,SubState,MainPID,NRestarts,CPUUsageNSec,MemoryCurrent,UnitFileState 2>/dev/null");
+
+    char *output = exec_cmd_output(cmd);
+    if (output) {
+        char *saveptr = NULL;
+        char *line = strtok_r(output, "\r\n", &saveptr);
+        ProcessInfo *cur = NULL;
+
+        while (line) {
+            char *eq = strchr(line, '=');
+            if (eq) {
+                *eq = '\0';
+                const char *key = line;
+                const char *val = eq + 1;
+
+                if (strcmp(key, "Id") == 0) {
+                    cur = NULL;
+                    for (int i = 0; i < count; i++) {
+                        if (strcmp(list[i].unit_name, val) == 0) {
+                            cur = &list[i];
+                            break;
+                        }
+                    }
+                } else if (cur) {
+                    if (strcmp(key, "ActiveState") == 0) {
+                        snprintf(cur->active_state, sizeof(cur->active_state), "%s", val);
+                    } else if (strcmp(key, "SubState") == 0) {
+                        snprintf(cur->sub_state, sizeof(cur->sub_state), "%s", val);
+                    } else if (strcmp(key, "MainPID") == 0) {
+                        cur->pid = (pid_t)atoi(val);
+                    } else if (strcmp(key, "NRestarts") == 0) {
+                        cur->restart_count = (uint32_t)strtoul(val, NULL, 10);
+                    } else if (strcmp(key, "CPUUsageNSec") == 0 && strcmp(val, "[not set]") != 0) {
+                        cur->cpu_usage_nsec = strtoull(val, NULL, 10);
+                    } else if (strcmp(key, "MemoryCurrent") == 0 && strcmp(val, "[not set]") != 0) {
+                        cur->memory_bytes = strtoull(val, NULL, 10);
+                    } else if (strcmp(key, "UnitFileState") == 0) {
+                        if (strcmp(val, "enabled") == 0) cur->enabled = true;
+                    }
+                }
+            }
+            line = strtok_r(NULL, "\r\n", &saveptr);
+        }
+        free(output);
+
+        for (int i = 0; i < count; i++) {
+            if (list[i].pid > 0 && list[i].memory_bytes == 0) {
+                read_proc_stats(list[i].pid, &list[i].memory_bytes, &list[i].cpu_percent);
+            }
+        }
+    } else {
+        /* Fallback if batch query fails */
+        for (int i = 0; i < count; i++) {
+            systemd_get_unit_status(names[i], scope, &list[i]);
+        }
     }
 
     unit_gen_free_names(names, count);

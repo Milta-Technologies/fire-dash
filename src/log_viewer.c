@@ -6,26 +6,68 @@
 #include <fcntl.h>
 #include <ctype.h>
 #include <time.h>
+#include <sys/wait.h>
+#include <signal.h>
 
 void log_viewer_init(LogViewer *lv) {
     if (!lv) return;
     memset(lv, 0, sizeof(*lv));
     lv->auto_scroll = true;
     lv->level_filter = LOG_LEVEL_ALL;
+    lv->is_dirty = true;
+}
+
+static FILE *log_stream_open(const char *cmd, pid_t *out_pid) {
+    int fds[2];
+    if (pipe(fds) < 0) return NULL;
+
+    pid_t pid = fork();
+    if (pid < 0) {
+        close(fds[0]);
+        close(fds[1]);
+        return NULL;
+    }
+
+    if (pid == 0) {
+        /* Child process */
+        close(fds[0]);
+        dup2(fds[1], STDOUT_FILENO);
+        dup2(fds[1], STDERR_FILENO);
+        close(fds[1]);
+        execl("/bin/sh", "sh", "-c", cmd, (char *)NULL);
+        _exit(127);
+    }
+
+    /* Parent process */
+    close(fds[1]);
+    int flags = fcntl(fds[0], F_GETFL, 0);
+    if (flags >= 0) {
+        fcntl(fds[0], F_SETFL, flags | O_NONBLOCK);
+    }
+    *out_pid = pid;
+    return fdopen(fds[0], "r");
 }
 
 void log_viewer_cleanup(LogViewer *lv) {
     if (!lv) return;
+    if (lv->stream_pid > 0) {
+        kill(lv->stream_pid, SIGTERM);
+        int status;
+        waitpid(lv->stream_pid, &status, WNOHANG);
+        lv->stream_pid = 0;
+    }
     if (lv->stream_pipe) {
-        pclose(lv->stream_pipe);
+        fclose(lv->stream_pipe);
         lv->stream_pipe = NULL;
     }
+    lv->partial_len = 0;
 }
 
 void log_viewer_set_level_filter(LogViewer *lv, LogViewerLevel level) {
     if (!lv) return;
     lv->level_filter = level;
     lv->scroll_offset = 0;
+    lv->is_dirty = true;
 }
 
 const char *log_viewer_level_name(LogViewerLevel level) {
@@ -71,6 +113,7 @@ void log_viewer_add_marker(LogViewer *lv) {
     memset(ll, 0, sizeof(*ll));
     snprintf(ll->text, sizeof(ll->text), "%s", marker_text);
     ll->is_marker = true;
+    lv->is_dirty = true;
 
     if (!lv->is_paused && lv->auto_scroll) {
         lv->scroll_offset = 0;
@@ -115,6 +158,7 @@ void log_viewer_insert_marker_after(LogViewer *lv, int real_line_idx) {
     memset(ll, 0, sizeof(*ll));
     snprintf(ll->text, sizeof(ll->text), "%s", marker_text);
     ll->is_marker = true;
+    lv->is_dirty = true;
 }
 
 static void extract_app_name(const char *text, char *out, size_t out_cap) {
@@ -187,6 +231,8 @@ void log_viewer_append(LogViewer *lv, const char *text, bool is_err) {
         }
     }
 
+    lv->is_dirty = true;
+
     /* Pause and scroll offset management */
     if (lv->is_paused) {
         lv->paused_buffered_count++;
@@ -206,6 +252,8 @@ void log_viewer_set_app(LogViewer *lv, const char *app_name, SystemdScope scope)
     lv->auto_scroll = true;
     lv->is_paused = false;
     lv->paused_buffered_count = 0;
+    lv->partial_len = 0;
+    lv->is_dirty = true;
 
     if (!app_name || !*app_name || strcmp(app_name, "ALL") == 0) {
         lv->is_all_apps = true;
@@ -231,14 +279,7 @@ void log_viewer_set_app(LogViewer *lv, const char *app_name, SystemdScope scope)
                  "journalctl %s -u '%s*.service' -f -n 0 --output=with-unit --no-pager 2>/dev/null",
                  scope == SCOPE_USER ? "--user" : "", FIRE_UNIT_PREFIX);
 
-        lv->stream_pipe = popen(cmd, "r");
-        if (lv->stream_pipe) {
-            int fd = fileno(lv->stream_pipe);
-            int flags = fcntl(fd, F_GETFL, 0);
-            if (flags >= 0) {
-                fcntl(fd, F_SETFL, flags | O_NONBLOCK);
-            }
-        }
+        lv->stream_pipe = log_stream_open(cmd, &lv->stream_pid);
         return;
     }
 
@@ -266,14 +307,7 @@ void log_viewer_set_app(LogViewer *lv, const char *app_name, SystemdScope scope)
              "journalctl %s -u %s%s.service -f -n 0 --output=short-iso --no-pager 2>/dev/null",
              scope == SCOPE_USER ? "--user" : "", FIRE_UNIT_PREFIX, app_name);
 
-    lv->stream_pipe = popen(cmd, "r");
-    if (lv->stream_pipe) {
-        int fd = fileno(lv->stream_pipe);
-        int flags = fcntl(fd, F_GETFL, 0);
-        if (flags >= 0) {
-            fcntl(fd, F_SETFL, flags | O_NONBLOCK);
-        }
-    }
+    lv->stream_pipe = log_stream_open(cmd, &lv->stream_pid);
 }
 
 void log_viewer_poll(LogViewer *lv) {
@@ -283,12 +317,26 @@ void log_viewer_poll(LogViewer *lv) {
     ssize_t bytes_read;
     int fd = fileno(lv->stream_pipe);
 
-    while ((bytes_read = read(fd, buffer, sizeof(buffer) - 1)) > 0) {
-        buffer[bytes_read] = '\0';
-        char *line = strtok(buffer, "\r\n");
-        while (line) {
-            log_viewer_append(lv, line, false);
-            line = strtok(NULL, "\r\n");
+    while ((bytes_read = read(fd, buffer, sizeof(buffer))) > 0) {
+        for (ssize_t i = 0; i < bytes_read; i++) {
+            char ch = buffer[i];
+            if (ch == '\n' || ch == '\r') {
+                if (lv->partial_len > 0) {
+                    lv->partial_buf[lv->partial_len] = '\0';
+                    log_viewer_append(lv, lv->partial_buf, false);
+                    lv->partial_len = 0;
+                }
+            } else {
+                if (lv->partial_len < sizeof(lv->partial_buf) - 1) {
+                    lv->partial_buf[lv->partial_len++] = ch;
+                } else {
+                    /* Max line length reached without newline, flush line */
+                    lv->partial_buf[lv->partial_len] = '\0';
+                    log_viewer_append(lv, lv->partial_buf, false);
+                    lv->partial_len = 0;
+                    lv->partial_buf[lv->partial_len++] = ch;
+                }
+            }
         }
     }
 }
@@ -301,6 +349,7 @@ void log_viewer_set_filter(LogViewer *lv, const char *filter) {
         lv->search_filter[0] = '\0';
     }
     lv->scroll_offset = 0;
+    lv->is_dirty = true;
 }
 
 void log_viewer_scroll_up(LogViewer *lv, int delta) {

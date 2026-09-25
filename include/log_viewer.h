@@ -34,6 +34,10 @@ typedef struct {
     bool is_paused;
     int paused_buffered_count;
     FILE *stream_pipe;
+    pid_t stream_pid;
+    char partial_buf[MAX_LOG_LINE_LEN];
+    size_t partial_len;
+    bool is_dirty;
 } LogViewer;
 
 /* Initializes log viewer state */
