@@ -75,9 +75,9 @@ static int parse_app_item(cJSON *item, SystemdScope default_scope, AppService *a
     }
 
     const char *script_val = script_item->valuestring;
-    /* If script is not an absolute path, wrap with /bin/sh -c to support complex commands and relative scripts */
+    /* If script is not an absolute path, wrap with /bin/bash -lc to support complex commands, NVM, and user environment */
     if (script_val[0] != '/') {
-        snprintf(app->script, sizeof(app->script), "/bin/sh -c \"%s\"", script_val);
+        snprintf(app->script, sizeof(app->script), "/bin/bash -lc \"%s\"", script_val);
     } else {
         snprintf(app->script, sizeof(app->script), "%s", script_val);
     }

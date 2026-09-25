@@ -109,17 +109,38 @@ int unit_gen_create_service(const AppService *app, char *err_buf, size_t err_len
     fprintf(fp, "StandardError=journal\n");
 
     bool has_path_env = false;
+    bool has_home_env = false;
     for (int i = 0; i < app->env_count; i++) {
         if (strcmp(app->envs[i].key, "PATH") == 0) {
             has_path_env = true;
         }
+        if (strcmp(app->envs[i].key, "HOME") == 0) {
+            has_home_env = true;
+        }
         fprintf(fp, "Environment=\"%s=%s\"\n", app->envs[i].key, app->envs[i].value);
     }
+
     if (!has_path_env) {
         const char *cur_path = getenv("PATH");
+        char full_path[4096];
         if (cur_path && *cur_path) {
-            fprintf(fp, "Environment=\"PATH=%s\"\n", cur_path);
+            snprintf(full_path, sizeof(full_path), "%s:/usr/local/bin:/usr/bin:/bin:/usr/local/sbin:/usr/sbin", cur_path);
+        } else {
+            snprintf(full_path, sizeof(full_path), "/usr/local/bin:/usr/bin:/bin:/usr/local/sbin:/usr/sbin");
         }
+        fprintf(fp, "Environment=\"PATH=%s\"\n", full_path);
+    }
+
+    if (!has_home_env) {
+        const char *home = getenv("HOME");
+        if (home && *home) {
+            fprintf(fp, "Environment=\"HOME=%s\"\n", home);
+        }
+    }
+
+    const char *user = getenv("USER");
+    if (user && *user) {
+        fprintf(fp, "Environment=\"USER=%s\"\n", user);
     }
 
     fprintf(fp, "\n[Install]\n");

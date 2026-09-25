@@ -211,7 +211,7 @@ static int cmd_start(int argc, char **argv, SystemdScope scope) {
 
     /* Script command */
     if (target[0] != '/') {
-        snprintf(app.script, sizeof(app.script), "/bin/sh -c \"%s\"", target);
+        snprintf(app.script, sizeof(app.script), "/bin/bash -lc \"%s\"", target);
     } else {
         snprintf(app.script, sizeof(app.script), "%s", target);
     }
