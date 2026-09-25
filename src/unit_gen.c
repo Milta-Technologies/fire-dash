@@ -108,8 +108,18 @@ int unit_gen_create_service(const AppService *app, char *err_buf, size_t err_len
     fprintf(fp, "StandardOutput=journal\n");
     fprintf(fp, "StandardError=journal\n");
 
+    bool has_path_env = false;
     for (int i = 0; i < app->env_count; i++) {
+        if (strcmp(app->envs[i].key, "PATH") == 0) {
+            has_path_env = true;
+        }
         fprintf(fp, "Environment=\"%s=%s\"\n", app->envs[i].key, app->envs[i].value);
+    }
+    if (!has_path_env) {
+        const char *cur_path = getenv("PATH");
+        if (cur_path && *cur_path) {
+            fprintf(fp, "Environment=\"PATH=%s\"\n", cur_path);
+        }
     }
 
     fprintf(fp, "\n[Install]\n");
