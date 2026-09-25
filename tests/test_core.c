@@ -59,6 +59,16 @@ static void test_unit_generator(void) {
     snprintf(svc_path, sizeof(svc_path), "%s/%s%s.service", dir, FIRE_UNIT_PREFIX, app.name);
     assert(access(svc_path, R_OK) == 0);
 
+    FILE *sfp = fopen(svc_path, "r");
+    assert(sfp != NULL);
+    char scontent[2048];
+    size_t nr = fread(scontent, 1, sizeof(scontent) - 1, sfp);
+    scontent[nr] = '\0';
+    fclose(sfp);
+    assert(strstr(scontent, "MemoryAccounting=yes") != NULL);
+    assert(strstr(scontent, "CPUAccounting=yes") != NULL);
+    assert(strstr(scontent, "TasksAccounting=yes") != NULL);
+
     char path_path[MAX_PATH_LEN];
     snprintf(path_path, sizeof(path_path), "%s/%s%s.path", dir, FIRE_UNIT_PREFIX, app.name);
     assert(access(path_path, R_OK) == 0);

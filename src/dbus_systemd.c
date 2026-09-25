@@ -9,6 +9,10 @@
 #include <time.h>
 #include <errno.h>
 
+#if defined(__APPLE__)
+#include <libproc.h>
+#endif
+
 #if defined(__linux__) && defined(HAVE_LIBSYSTEMD)
 #include <systemd/sd-bus.h>
 static sd_bus *g_user_bus = NULL;
@@ -292,7 +296,7 @@ int systemd_reset_failed(const char *name, SystemdScope scope) {
     return exec_cmd_silent(cmd);
 }
 
-/* Reads live process memory & CPU directly from /proc on Linux */
+/* Reads live process memory & CPU directly from /proc on Linux or libproc on macOS */
 static void read_proc_stats(pid_t pid, uint64_t *mem_bytes, double *cpu_percent) {
     if (pid <= 0) return;
 
@@ -315,25 +319,14 @@ static void read_proc_stats(pid_t pid, uint64_t *mem_bytes, double *cpu_percent)
         fclose(fp);
     }
 
-    /* CPU calculation via /proc/[pid]/stat */
-    snprintf(path, sizeof(path), "/proc/%d/stat", pid);
-    fp = fopen(path, "r");
-    if (fp) {
-        char buf[1024];
-        if (fgets(buf, sizeof(buf), fp)) {
-            char *comm_end = strrchr(buf, ')');
-            if (comm_end) {
-                unsigned long utime = 0, stime = 0;
-                /* Scan starting after comm */
-                sscanf(comm_end + 2,
-                       "%*c %*d %*d %*d %*d %*d %*u %*u %*u %*u %*u %lu %lu",
-                       &utime, &stime);
-                /* Simple estimate if needed */
-                (void)utime; (void)stime;
-            }
-        }
-        fclose(fp);
+    (void)cpu_percent;
+#elif defined(__APPLE__)
+    struct proc_taskinfo pti;
+    int ret = proc_pidinfo(pid, PROC_PIDTASKINFO, 0, &pti, sizeof(pti));
+    if (ret == (int)sizeof(pti) && pti.pti_resident_size > 0) {
+        *mem_bytes = (uint64_t)pti.pti_resident_size;
     }
+    (void)cpu_percent;
 #else
     (void)pid;
     (void)mem_bytes;
@@ -381,10 +374,12 @@ int systemd_get_unit_status(const char *name, SystemdScope scope, ProcessInfo *i
                 info->pid = (pid_t)atoi(val);
             } else if (strcmp(key, "NRestarts") == 0) {
                 info->restart_count = (uint32_t)strtoul(val, NULL, 10);
-            } else if (strcmp(key, "CPUUsageNSec") == 0 && strcmp(val, "[not set]") != 0) {
-                info->cpu_usage_nsec = strtoull(val, NULL, 10);
-            } else if (strcmp(key, "MemoryCurrent") == 0 && strcmp(val, "[not set]") != 0) {
-                info->memory_bytes = strtoull(val, NULL, 10);
+            } else if (strcmp(key, "CPUUsageNSec") == 0 && strcmp(val, "[not set]") != 0 && strcmp(val, "18446744073709551615") != 0) {
+                uint64_t cpu = strtoull(val, NULL, 10);
+                if (cpu != (uint64_t)-1) info->cpu_usage_nsec = cpu;
+            } else if (strcmp(key, "MemoryCurrent") == 0 && strcmp(val, "[not set]") != 0 && strcmp(val, "18446744073709551615") != 0) {
+                uint64_t m = strtoull(val, NULL, 10);
+                if (m != (uint64_t)-1) info->memory_bytes = m;
             } else if (strcmp(key, "UnitFileState") == 0) {
                 if (strcmp(val, "enabled") == 0) info->enabled = true;
             }
@@ -467,10 +462,12 @@ int systemd_list_all(SystemdScope scope, ProcessInfo **out_list, int *out_count)
                         cur->pid = (pid_t)atoi(val);
                     } else if (strcmp(key, "NRestarts") == 0) {
                         cur->restart_count = (uint32_t)strtoul(val, NULL, 10);
-                    } else if (strcmp(key, "CPUUsageNSec") == 0 && strcmp(val, "[not set]") != 0) {
-                        cur->cpu_usage_nsec = strtoull(val, NULL, 10);
-                    } else if (strcmp(key, "MemoryCurrent") == 0 && strcmp(val, "[not set]") != 0) {
-                        cur->memory_bytes = strtoull(val, NULL, 10);
+                    } else if (strcmp(key, "CPUUsageNSec") == 0 && strcmp(val, "[not set]") != 0 && strcmp(val, "18446744073709551615") != 0) {
+                        uint64_t cpu = strtoull(val, NULL, 10);
+                        if (cpu != (uint64_t)-1) cur->cpu_usage_nsec = cpu;
+                    } else if (strcmp(key, "MemoryCurrent") == 0 && strcmp(val, "[not set]") != 0 && strcmp(val, "18446744073709551615") != 0) {
+                        uint64_t m = strtoull(val, NULL, 10);
+                        if (m != (uint64_t)-1) cur->memory_bytes = m;
                     } else if (strcmp(key, "UnitFileState") == 0) {
                         if (strcmp(val, "enabled") == 0) cur->enabled = true;
                     }

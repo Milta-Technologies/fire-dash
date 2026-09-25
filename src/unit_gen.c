@@ -107,6 +107,9 @@ int unit_gen_create_service(const AppService *app, char *err_buf, size_t err_len
     fprintf(fp, "RestartSec=%d\n", app->restart_sec > 0 ? app->restart_sec : 2);
     fprintf(fp, "StandardOutput=journal\n");
     fprintf(fp, "StandardError=journal\n");
+    fprintf(fp, "CPUAccounting=yes\n");
+    fprintf(fp, "MemoryAccounting=yes\n");
+    fprintf(fp, "TasksAccounting=yes\n");
 
     bool has_path_env = false;
     bool has_home_env = false;

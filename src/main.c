@@ -39,7 +39,7 @@ static void print_usage(const char *prog) {
 }
 
 static void format_mem(uint64_t bytes, char *out, size_t max_len) {
-    if (bytes == 0) {
+    if (bytes == 0 || bytes == (uint64_t)-1 || bytes == 18446744073709551615ULL) {
         snprintf(out, max_len, "0 B");
     } else if (bytes < 1024) {
         snprintf(out, max_len, "%llu B", (unsigned long long)bytes);
