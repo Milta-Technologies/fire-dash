@@ -42,15 +42,21 @@ Running `fdash` without arguments (or typing `fdash monit`) opens the split-pane
 ```
 
 ### Dashboard Shortcuts:
-- `↑` / `↓` or `k` / `j`: Select application in the table
-- `s`: Start selected application
-- `x`: Stop selected application
-- `r`: Restart selected application
+- `↑` / `↓` or `k` / `j`: Navigate applications in table (Index 0 is `[ALL APPS]`)
+- `a`: Quick-toggle between active single-app logs and unified `[ALL APPS]` stream
+- `f` or `Enter`: Toggle **Fullscreen Log View** (expands logs to full terminal height)
+- `l`: Cycle log triage filter level: `ALL` ➔ `WARN+ERR` ➔ `ERR ONLY`
+- `/`: Interactive log search with instant keyword highlighting (`Esc` to cancel, `Enter` to commit)
+- `Space`: **Pause / Resume** live auto-scroll (buffers incoming logs in background)
+- `m`: Insert a visual checkpoint marker (`─── [MARK: HH:MM:SS] ───`)
+- `PageUp` / `PageDown` or `u` / `d`: Scroll through logs
+- `g`: Jump to oldest log line in buffer
+- `b` or `G`: Jump to bottom / resume auto-scroll
+- `s`: Start selected application (or all applications if `[ALL APPS]` is selected)
+- `x`: Stop selected application (or all applications if `[ALL APPS]` is selected)
+- `r`: Restart selected application (or all applications if `[ALL APPS]` is selected)
 - `d`: Delete service unit and unregister from systemd
-- `/`: Enter log search/filter mode (press `Esc` to clear, `Enter` to confirm)
-- `PageUp` / `PageDown`: Scroll through logs
-- `b`: Jump to bottom / resume auto-scroll
-- `Tab`: Toggle focus
+- `Esc`: Clear search filter, reset triage level, or exit fullscreen mode
 - `q` or `Ctrl+C`: Exit dashboard
 
 ---

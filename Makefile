@@ -36,7 +36,7 @@ $(TARGET): $(OBJ)
 test: $(TEST_TARGET)
 	@./$(TEST_TARGET)
 
-$(TEST_TARGET): tests/test_core.o src/cJSON.o src/config.o src/unit_gen.o
+$(TEST_TARGET): tests/test_core.o src/cJSON.o src/config.o src/unit_gen.o src/log_viewer.o
 	@mkdir -p bin
 	$(CC) $^ -o $@ $(LDFLAGS)
 
@@ -57,4 +57,4 @@ uninstall:
 	@echo "Removed fdash and fire-dash from $(DESTDIR)$(BINDIR)/"
 
 clean:
-	rm -f src/*.o $(TARGET)
+	rm -f src/*.o tests/*.o $(TARGET) $(TEST_TARGET)

@@ -12,7 +12,9 @@ typedef enum {
 typedef struct {
     int rows;
     int cols;
-    int selected_idx;
+    int selected_idx;       /* 0 = [ALL APPS], 1..N = apps[0..N-1] */
+    int last_app_idx;       /* Last non-zero selected app index */
+    bool fullscreen_logs;   /* Toggle between 50/50 split and fullscreen logs */
     TUIFocus focus;
     bool search_mode;
     char search_input[128];
