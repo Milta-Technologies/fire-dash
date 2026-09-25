@@ -15,10 +15,25 @@
 
 static struct termios orig_termios;
 static volatile sig_atomic_t g_win_resized = 0;
+static bool g_raw_enabled = false;
 
 static void handle_winch(int sig) {
     (void)sig;
     g_win_resized = 1;
+}
+
+static void disable_raw_mode(void) {
+    if (!g_raw_enabled) return;
+    /* Disable mouse tracking, show cursor, restore main screen */
+    write(STDOUT_FILENO, "\033[?1006l\033[?1000l\033[?25h\033[?1049l", 28);
+    tcsetattr(STDIN_FILENO, TCSAFLUSH, &orig_termios);
+    g_raw_enabled = false;
+}
+
+static void handle_sig_exit(int sig) {
+    (void)sig;
+    disable_raw_mode();
+    _exit(0);
 }
 
 static void enable_raw_mode(void) {
@@ -32,14 +47,10 @@ static void enable_raw_mode(void) {
     raw.c_cc[VTIME] = 1;
     tcsetattr(STDIN_FILENO, TCSAFLUSH, &raw);
 
-    /* Switch to alternate screen, hide cursor */
-    write(STDOUT_FILENO, "\033[?1049h\033[?25l", 14);
-}
-
-static void disable_raw_mode(void) {
-    /* Show cursor, restore main screen */
-    write(STDOUT_FILENO, "\033[?25h\033[?1049l", 14);
-    tcsetattr(STDIN_FILENO, TCSAFLUSH, &orig_termios);
+    /* Switch to alternate screen, hide cursor, enable SGR mouse tracking */
+    write(STDOUT_FILENO, "\033[?1049h\033[?25l\033[?1000h\033[?1006h", 28);
+    g_raw_enabled = true;
+    atexit(disable_raw_mode);
 }
 
 static void update_window_size(TUIState *state) {
@@ -177,7 +188,7 @@ static void render_dashboard(TUIState *state, ProcessInfo *apps, int app_count) 
         if (state->status_msg[0] && (time(NULL) - state->status_msg_time < 4)) {
             sb_printf(&sb, " \033[38;5;226;1m⚡ %s\033[0m\033[K\r\n", state->status_msg);
         } else {
-            sb_printf(&sb, "\033[38;5;244m [f/Enter/Esc] Exit Fullscreen  [l] Level: %-8s  [Space] Pause  [m] Mark  [/] Search  [q] Quit\033[0m\033[K\r\n",
+            sb_printf(&sb, "\033[38;5;244m [↑/↓/Wheel] Scroll Logs  [f/Enter/Esc] Split View  [l] Level: %-8s  [Space] Pause  [/] Search  [q] Quit\033[0m\033[K\r\n",
                       log_viewer_level_name(state->log_viewer.level_filter));
         }
 
@@ -209,8 +220,11 @@ static void render_dashboard(TUIState *state, ProcessInfo *apps, int app_count) 
         if (table_max_rows < 4) table_max_rows = 4;
 
         /* Table Header */
-        sb_printf(&sb, "\033[38;5;248;1m  %-4s %-18s %-12s %-8s %-10s %-8s %-12s\033[0m\033[K\r\n",
-                  "ID", "NAME", "STATUS", "PID", "MEMORY", "RESTARTS", "WATCH");
+        const char *apps_header_tag = (state->focus == FOCUS_PROCESSES)
+                                      ? "\033[38;5;48;1m[ACTIVE FOCUS]\033[0m"
+                                      : "\033[38;5;240m[Tab to focus]\033[0m";
+        sb_printf(&sb, "\033[38;5;248;1m  %-4s %-18s %-12s %-8s %-10s %-8s %-12s\033[0m %s\033[K\r\n",
+                  "ID", "NAME", "STATUS", "PID", "MEMORY", "RESTARTS", "WATCH", apps_header_tag);
 
         int visible_start = 0;
         if (state->selected_idx >= table_max_rows) {
@@ -301,7 +315,10 @@ static void render_dashboard(TUIState *state, ProcessInfo *apps, int app_count) 
         if (state->status_msg[0] && (time(NULL) - state->status_msg_time < 4)) {
             sb_printf(&sb, " \033[38;5;226;1m⚡ %s\033[0m\033[K\r\n", state->status_msg);
         } else {
-            sb_printf(&sb, "\033[38;5;244m [↑/↓/j/k] Nav  [a] All-Apps  [f/Enter] Fullscreen  [l] Level  [/] Search  [Space] Pause  [m] Mark  [s/x/r] Svc  [q] Quit\033[0m\033[K\r\n");
+            const char *focus_hint = (state->focus == FOCUS_LOGS)
+                                     ? "\033[38;5;214;1m[Tab] Focus: LOGS (↑/↓/Wheel scroll)\033[0m"
+                                     : "\033[38;5;48;1m[Tab] Focus: APPS (↑/↓ select)\033[0m";
+            sb_printf(&sb, " %s  \033[38;5;244m[a] All-Apps  [f/Enter] Fullscreen  [l] Level  [/] Search  [Space] Pause  [m] Mark  [q] Quit\033[0m\033[K\r\n", focus_hint);
         }
 
         log_rows_avail = rows - (5 + table_max_rows + 4);
@@ -319,6 +336,13 @@ static void render_dashboard(TUIState *state, ProcessInfo *apps, int app_count) 
     sb_printf(&sb, "\033[38;5;214;1mLogs: %s\033[0m \033[38;5;244m(%d lines)\033[0m ",
               selected_view_name, state->log_viewer.count);
 
+    /* Focus badge on logs if split view */
+    if (!state->fullscreen_logs) {
+        if (state->focus == FOCUS_LOGS) {
+            sb_printf(&sb, "\033[48;5;214;38;5;16;1m[FOCUS: LOGS]\033[0m ");
+        }
+    }
+
     /* Level filter indicator */
     if (state->log_viewer.level_filter == LOG_LEVEL_ERR_ONLY) {
         sb_printf(&sb, "\033[38;5;196;1m[Level: ERR ONLY]\033[0m ");
@@ -332,7 +356,7 @@ static void render_dashboard(TUIState *state, ProcessInfo *apps, int app_count) 
     if (state->search_mode) {
         sb_printf(&sb, "\033[38;5;226;1m[Search: %s_]\033[0m ", state->search_input);
     } else if (state->log_viewer.search_filter[0]) {
-        sb_printf(&sb, "\033[38;5;51;1m[Filter: \"%s\"]\033[0m ", state->log_viewer.search_filter);
+        sb_printf(&sb, "\033[38;5;51m[Filter: \"%s\"]\033[0m ", state->log_viewer.search_filter);
     }
 
     /* Auto-scroll / Pause indicator */
@@ -344,7 +368,7 @@ static void render_dashboard(TUIState *state, ProcessInfo *apps, int app_count) 
         sb_printf(&sb, "\033[38;5;208m[scrolled +%d]\033[0m ", state->log_viewer.scroll_offset);
     }
 
-    for (int i = 0; i < cols - 65; i++) sb_append(&sb, "─", 3);
+    for (int i = 0; i < cols - 70; i++) sb_append(&sb, "─", 3);
     sb_append(&sb, "╮\033[0m\033[K\r\n", 9);
 
     /* 5. Render Log Lines */
@@ -440,6 +464,8 @@ int tui_run(SystemdScope scope) {
     log_viewer_init(&state.log_viewer);
 
     signal(SIGWINCH, handle_winch);
+    signal(SIGINT, handle_sig_exit);
+    signal(SIGTERM, handle_sig_exit);
     enable_raw_mode();
     update_window_size(&state);
 
@@ -509,6 +535,7 @@ int tui_run(SystemdScope scope) {
             char c;
             if (read(STDIN_FILENO, &c, 1) > 0) {
                 int total_items = app_count + 1;
+                bool scroll_logs = (state.fullscreen_logs || state.focus == FOCUS_LOGS);
 
                 if (state.search_mode) {
                     if (c == 27) { /* Escape: cancel search */
@@ -573,16 +600,52 @@ int tui_run(SystemdScope scope) {
                     if (read(STDIN_FILENO, &seq[0], 1) == 1 &&
                         read(STDIN_FILENO, &seq[1], 1) == 1) {
                         if (seq[0] == '[') {
-                            if (seq[1] == 'A') { /* Up Arrow */
-                                if (state.selected_idx > 0) state.selected_idx--;
+                            if (seq[1] == '<') {
+                                /* SGR Mouse reporting: \033[<btn;x;yM or m */
+                                char mbuf[64];
+                                int mlen = 0;
+                                char mc;
+                                while (mlen < (int)sizeof(mbuf) - 1) {
+                                    if (read(STDIN_FILENO, &mc, 1) != 1) break;
+                                    mbuf[mlen++] = mc;
+                                    if (mc == 'M' || mc == 'm') break;
+                                }
+                                mbuf[mlen] = '\0';
+                                int btn = atoi(mbuf);
+                                if (btn == 64) {
+                                    /* Mouse wheel Up: smooth scroll logs */
+                                    log_viewer_scroll_up(&state.log_viewer, 3);
+                                } else if (btn == 65) {
+                                    /* Mouse wheel Down: smooth scroll logs */
+                                    log_viewer_scroll_down(&state.log_viewer, 3);
+                                }
+                            } else if (seq[1] == 'A') { /* Up Arrow */
+                                if (scroll_logs) {
+                                    log_viewer_scroll_up(&state.log_viewer, 1);
+                                } else {
+                                    if (state.selected_idx > 0) state.selected_idx--;
+                                }
                             } else if (seq[1] == 'B') { /* Down Arrow */
-                                if (state.selected_idx < total_items - 1) state.selected_idx++;
+                                if (scroll_logs) {
+                                    log_viewer_scroll_down(&state.log_viewer, 1);
+                                } else {
+                                    if (state.selected_idx < total_items - 1) state.selected_idx++;
+                                }
                             } else if (seq[1] == '5') { /* Page Up */
                                 read(STDIN_FILENO, &seq[2], 1); /* consume ~ */
                                 log_viewer_scroll_up(&state.log_viewer, 10);
                             } else if (seq[1] == '6') { /* Page Down */
                                 read(STDIN_FILENO, &seq[2], 1); /* consume ~ */
                                 log_viewer_scroll_down(&state.log_viewer, 10);
+                            }
+                        } else if (seq[0] == 'O') {
+                            /* SS3 mode for arrow keys */
+                            if (seq[1] == 'A') {
+                                if (scroll_logs) log_viewer_scroll_up(&state.log_viewer, 1);
+                                else if (state.selected_idx > 0) state.selected_idx--;
+                            } else if (seq[1] == 'B') {
+                                if (scroll_logs) log_viewer_scroll_down(&state.log_viewer, 1);
+                                else if (state.selected_idx < total_items - 1) state.selected_idx++;
                             }
                         }
                     } else {
@@ -599,11 +662,26 @@ int tui_run(SystemdScope scope) {
                         }
                     }
                 } else if (c == 'k') {
-                    if (state.selected_idx > 0) state.selected_idx--;
+                    if (scroll_logs) {
+                        log_viewer_scroll_up(&state.log_viewer, 1);
+                    } else {
+                        if (state.selected_idx > 0) state.selected_idx--;
+                    }
                 } else if (c == 'j') {
-                    if (state.selected_idx < total_items - 1) state.selected_idx++;
+                    if (scroll_logs) {
+                        log_viewer_scroll_down(&state.log_viewer, 1);
+                    } else {
+                        if (state.selected_idx < total_items - 1) state.selected_idx++;
+                    }
                 } else if (c == '\t') {
-                    state.focus = (state.focus == FOCUS_PROCESSES) ? FOCUS_LOGS : FOCUS_PROCESSES;
+                    if (!state.fullscreen_logs) {
+                        state.focus = (state.focus == FOCUS_PROCESSES) ? FOCUS_LOGS : FOCUS_PROCESSES;
+                        if (state.focus == FOCUS_LOGS) {
+                            set_status(&state, "Focus: LOGS (↑/↓/Wheel scroll logs, Tab to switch)");
+                        } else {
+                            set_status(&state, "Focus: PROCESSES (↑/↓ select app, Tab to switch)");
+                        }
+                    }
                 } else if (c == '/') {
                     state.search_mode = true;
                     state.search_input[0] = '\0';
