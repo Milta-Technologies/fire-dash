@@ -11,9 +11,10 @@
 #include <libgen.h>
 
 static void print_usage(const char *prog) {
-    printf("\033[38;5;208;1m🔥 fire-dash\033[0m \033[38;5;244mv%s - The ultra-lightweight systemd wrapper & process dashboard\033[0m\n\n", FIRE_VERSION);
+    (void)prog;
+    printf("\033[38;5;208;1m🔥 fdash\033[0m \033[38;5;244mv%s - The ultra-lightweight systemd wrapper & process dashboard\033[0m\n\n", FIRE_VERSION);
     printf("\033[1mUSAGE:\033[0m\n");
-    printf("  %s [command] [options]\n\n", prog);
+    printf("  fdash [command] [options]\n\n");
     printf("\033[1mCOMMANDS:\033[0m\n");
     printf("  \033[38;5;51m(no args)\033[0m                 Launch the interactive live TUI dashboard\n");
     printf("  \033[38;5;51mmonit\033[0m                     Alias to launch the live TUI dashboard\n");
@@ -57,12 +58,12 @@ static int cmd_list(SystemdScope scope) {
 
     systemd_list_all(scope, &list, &count);
 
-    printf("\033[38;5;208;1m🔥 fire-dash\033[0m \033[38;5;244mv%s\033[0m [Scope: \033[38;5;51;1m%s\033[0m]\n\n",
+    printf("\033[38;5;208;1m🔥 fdash\033[0m \033[38;5;244mv%s\033[0m [Scope: \033[38;5;51;1m%s\033[0m]\n\n",
            FIRE_VERSION, scope == SCOPE_SYSTEM ? "SYSTEM" : "USER");
 
     if (count == 0) {
-        printf("  No fire-dash managed applications found.\n");
-        printf("  Start one with: fire-dash start <script>\n\n");
+        printf("  No fdash managed applications found.\n");
+        printf("  Start one with: fdash start <script>\n\n");
         return 0;
     }
 
@@ -178,7 +179,7 @@ static int cmd_start(int argc, char **argv, SystemdScope scope) {
     }
 
     if (is_config) {
-        printf("\033[38;5;208;1m🔥 fire-dash\033[0m: Loading configuration from '\033[1m%s\033[0m'...\n", target);
+        printf("\033[38;5;208;1m🔥 fdash\033[0m: Loading configuration from '\033[1m%s\033[0m'...\n", target);
         AppService *apps = NULL;
         int count = 0;
         char err_buf[256];
@@ -199,7 +200,7 @@ static int cmd_start(int argc, char **argv, SystemdScope scope) {
 
     if (target[0] == '\0') {
         fprintf(stderr, "\033[31;1mError:\033[0m No script, command, or config file specified.\n");
-        fprintf(stderr, "Usage: fire-dash start <script|command|config.json> [--name <name>]\n");
+        fprintf(stderr, "Usage: fdash start <script|command|config.json> [--name <name>]\n");
         return 1;
     }
 
@@ -247,7 +248,7 @@ static int cmd_start(int argc, char **argv, SystemdScope scope) {
         }
     }
 
-    printf("\033[38;5;208;1m🔥 fire-dash\033[0m: Registering app '\033[1m%s\033[0m'...\n", app.name);
+    printf("\033[38;5;208;1m🔥 fdash\033[0m: Registering app '\033[1m%s\033[0m'...\n", app.name);
     start_single_app(&app, scope);
     printf("\n");
     cmd_list(scope);
@@ -337,18 +338,18 @@ static int cmd_save(SystemdScope scope) {
     int count = 0;
     unit_gen_list_names(scope, &names, &count);
     if (count == 0) {
-        printf("No fire-dash services found to save.\n");
+        printf("No fdash services found to save.\n");
         return 0;
     }
 
-    printf("\033[38;5;208;1m🔥 fire-dash\033[0m: Enabling %d services to persist on boot...\n", count);
+    printf("\033[38;5;208;1m🔥 fdash\033[0m: Enabling %d services to persist on boot...\n", count);
     for (int i = 0; i < count; i++) {
         printf("  Enabling \033[1m%s\033[0m... ", names[i]);
         systemd_enable_unit(names[i], scope);
         printf("\033[32mOK\033[0m\n");
     }
     unit_gen_free_names(names, count);
-    printf("✔ All fire-dash services enabled for auto-start.\n");
+    printf("✔ All fdash services enabled for auto-start.\n");
     return 0;
 }
 
@@ -395,7 +396,7 @@ int main(int argc, char **argv) {
         } else if (strcmp(argv[i], "--user") == 0) {
             scope = SCOPE_USER;
         } else if (strcmp(argv[i], "-v") == 0 || strcmp(argv[i], "--version") == 0) {
-            printf("fire-dash version %s\n", FIRE_VERSION);
+            printf("fdash version %s\n", FIRE_VERSION);
             return 0;
         } else if (strcmp(argv[i], "-h") == 0 || strcmp(argv[i], "--help") == 0 || strcmp(argv[i], "help") == 0) {
             print_usage(argv[0]);

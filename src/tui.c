@@ -150,7 +150,7 @@ static void render_dashboard(TUIState *state, ProcessInfo *apps, int app_count) 
     format_mem(total_mem, total_mem_str, sizeof(total_mem_str));
 
     /* Banner Line 1 */
-    sb_printf(&sb, "\033[38;5;208;1m🔥 fire-dash\033[0m \033[38;5;244mv%s\033[0m", FIRE_VERSION);
+    sb_printf(&sb, "\033[38;5;208;1m🔥 fdash\033[0m \033[38;5;244mv%s\033[0m", FIRE_VERSION);
     sb_printf(&sb, "  \033[38;5;240m│\033[0m  Scope: \033[38;5;51;1m%s\033[0m",
               state->scope == SCOPE_SYSTEM ? "SYSTEM (/etc)" : "USER (~/.config)");
     sb_printf(&sb, "  \033[38;5;240m│\033[0m  Online: \033[38;5;48;1m%d/%d\033[0m", running_count, app_count);
@@ -177,7 +177,7 @@ static void render_dashboard(TUIState *state, ProcessInfo *apps, int app_count) 
               "ID", "NAME", "STATUS", "PID", "MEMORY", "RESTARTS", "WATCH");
 
     if (app_count == 0) {
-        sb_printf(&sb, "\033[38;5;244m  No applications registered. Run 'fire-dash start <script>' or create fire.config.json\033[0m\033[K\r\n");
+        sb_printf(&sb, "\033[38;5;244m  No applications registered. Run 'fdash start <script>' or create fire.config.json\033[0m\033[K\r\n");
         for (int i = 1; i < table_max_rows; i++) {
             sb_append(&sb, "\033[K\r\n", 5);
         }

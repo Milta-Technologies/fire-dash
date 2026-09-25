@@ -1,19 +1,20 @@
-# 🔥 fire-dash
+# 🔥 fdash (fire-dash)
 
 > **The ultra-lightweight terminal process dashboard & manager on top of `systemd`.**  
-> Written in pure C (ANSI C99) with zero external TUI dependencies. Binary size: **< 100 KB**.
+> Written in pure C (ANSI C99) with zero external TUI dependencies. Binary size: **< 100 KB**.  
+> Primary command: **`fdash`** (alias: `fire-dash`).
 
 ---
 
-## ⚡ Why fire-dash?
+## ⚡ Why fdash?
 
 `pm2` is friendly, but it brings along a massive Node.js runtime, high idle memory consumption (50–100 MB+), and custom daemon failure modes. `systemd` is the rock-solid, kernel-level standard on modern Linux, but raw `systemctl` lacks an interactive terminal dashboard, quick developer commands, ecosystem JSON configs, and unified live log streaming.
 
-**`fire-dash` gives you the best of both worlds:**
+**`fdash` gives you the best of both worlds:**
 1. **Rock-Solid Foundation:** Every process is a true native `systemd` service (`fire-<name>.service`).
 2. **Ultra-Lightweight C Binary:** Consumes virtually **0 MB** RAM at idle and builds into a single self-contained ~90 KB executable.
-3. **PM2-like Developer Ergonomics:** Simple commands like `fire-dash start`, `stop`, `restart`, `delete`, `logs`, `save`.
-4. **Live Split-Pane TUI Dashboard:** Running `fire-dash` with no arguments opens an interactive terminal UI with live CPU/RAM metrics, process list, and real-time journal log tailing with search.
+3. **PM2-like Developer Ergonomics:** Simple commands like `fdash start`, `stop`, `restart`, `delete`, `logs`, `save`.
+4. **Live Split-Pane TUI Dashboard:** Running `fdash` with no arguments opens an interactive terminal UI with live CPU/RAM metrics, process list, and real-time journal log tailing with search.
 5. **Native Watch Mode via Systemd `.path` Units:** File watch triggers auto-restart natively through systemd without keeping extra Node.js/Python watcher daemons alive in memory!
 6. **Multi-App Config:** Define all your services in a `fire.config.json` (or `ecosystem.config.json`) and start them in one command.
 
@@ -21,10 +22,10 @@
 
 ## 🖥️ Interactive TUI Dashboard
 
-Running `fire-dash` without arguments (or typing `fire-dash monit`) opens the split-pane dashboard:
+Running `fdash` without arguments (or typing `fdash monit`) opens the split-pane dashboard:
 
 ```text
-🔥 fire-dash v1.0.0  │  Scope: USER (~/.config)  │  Online: 3/3  │  RAM: 142.4 MB          00:15:32
+🔥 fdash v1.0.0  │  Scope: USER (~/.config)  │  Online: 3/3  │  RAM: 142.4 MB          00:15:32
 ───────────────────────────────────────────────────────────────────────────────────────────────────
   ID   NAME               STATUS       PID      MEMORY     RESTARTS WATCH       
   ──── ────────────────── ──────────── ──────── ────────── ──────── ────────────
@@ -69,7 +70,7 @@ make
 sudo make install
 ```
 
-This installs the single static binary to `/usr/local/bin/fire-dash`.
+This installs **`fdash`** (and symlinks `fire-dash` alias) to `/usr/local/bin/`.
 
 ---
 
@@ -78,16 +79,16 @@ This installs the single static binary to `/usr/local/bin/fire-dash`.
 ### 1. Starting an App
 ```bash
 # Start a script with auto-derived name
-fire-dash start app.js
+fdash start app.js
 
 # Custom name and working directory
-fire-dash start "node server.js" --name api --cwd /var/www/api
+fdash start "node server.js" --name api --cwd /var/www/api
 
 # Enable watch mode (creates fire-api.path watching the folder)
-fire-dash start "python3 bot.py" --name discord-bot --watch ./src
+fdash start "python3 bot.py" --name discord-bot --watch ./src
 
 # Target system scope (/etc/systemd/system) instead of user scope
-sudo fire-dash start "node prod.js" --name prod-api --system
+sudo fdash start "node prod.js" --name prod-api --system
 ```
 
 ### 2. Multi-App Config (`fire.config.json`)
@@ -97,7 +98,7 @@ Create a `fire.config.json` in your project root:
   "apps": [
     {
       "name": "api-service",
-      "script": "node server.js",
+      "script": "npm run build && npm start",
       "cwd": "./server",
       "env": {
         "NODE_ENV": "production",
@@ -118,40 +119,40 @@ Create a `fire.config.json` in your project root:
 
 Start all apps at once:
 ```bash
-fire-dash start
+fdash start
 # or specify file:
-fire-dash start fire.config.json
+fdash start fire.config.json
 ```
 
 ### 3. Process Control
 ```bash
 # Stop a service or all services
-fire-dash stop api-service
-fire-dash stop all
+fdash stop api-service
+fdash stop all
 
 # Restart a service or all services
-fire-dash restart api-service
-fire-dash restart all
+fdash restart api-service
+fdash restart all
 
 # Delete / unregister services
-fire-dash delete api-service
-fire-dash delete all
+fdash delete api-service
+fdash delete all
 ```
 
 ### 4. Viewing Status & Logs
 ```bash
 # Non-interactive CLI table (ideal for scripts and CI)
-fire-dash list
-fire-dash ls
+fdash list
+fdash ls
 
 # Stream logs in terminal
-fire-dash logs api-service -f
-fire-dash logs -n 100
+fdash logs api-service -f
+fdash logs -n 100
 ```
 
 ### 5. Persist Across Reboots
 ```bash
-fire-dash save
+fdash save
 ```
 Enables all currently registered `fire-*` units with systemd so they boot automatically on system restart.
 
@@ -160,7 +161,7 @@ Enables all currently registered `fire-*` units with systemd so they boot automa
 ## 📐 Architecture
 
 - **`src/tui.c`**: ANSI escape sequences with raw termios. Double-buffered single-write frame pipeline. Zero dependencies on ncurses.
-- **`src/unit_gen.c`**: Generates standard INI `fire-<name>.service` and `fire-<name>.path` units in `~/.config/systemd/user/` or `/etc/systemd/system/`.
+- **`src/unit_gen.c`**: Generates standard INI `fire-<name>.service` and `fire-<name>.path` units in `~/.config/systemd/user/` or `/etc/systemd/system/`. Injects host `$PATH`, `$HOME`, and `$USER`.
 - **`src/dbus_systemd.c`**: Direct D-Bus (`sd-bus`) communication with fallback CLI wrapper, querying unit active states, restart counters, and `/proc/<pid>/` memory & CPU metrics.
 - **`src/log_viewer.c`**: Ring-buffered journal log streamer with non-blocking pipes, search indexing, and auto-scroll handling.
 - **`src/config.c` & `src/cJSON.c`**: Embedded lightweight JSON parser for config files.

@@ -18,7 +18,7 @@ SRC = src/cJSON.c \
       src/main.c
 
 OBJ = $(SRC:.c=.o)
-TARGET = bin/fire-dash
+TARGET = bin/fdash
 TEST_TARGET = bin/test_core
 
 PREFIX ?= /usr/local
@@ -48,12 +48,13 @@ debug: clean all
 
 install: $(TARGET)
 	install -d $(DESTDIR)$(BINDIR)
-	install -m 755 $(TARGET) $(DESTDIR)$(BINDIR)/fire-dash
-	@echo "Installed fire-dash to $(DESTDIR)$(BINDIR)/fire-dash"
+	install -m 755 $(TARGET) $(DESTDIR)$(BINDIR)/fdash
+	ln -sf fdash $(DESTDIR)$(BINDIR)/fire-dash
+	@echo "Installed fdash (and fire-dash alias) to $(DESTDIR)$(BINDIR)/"
 
 uninstall:
-	rm -f $(DESTDIR)$(BINDIR)/fire-dash
-	@echo "Removed fire-dash from $(DESTDIR)$(BINDIR)/fire-dash"
+	rm -f $(DESTDIR)$(BINDIR)/fdash $(DESTDIR)$(BINDIR)/fire-dash
+	@echo "Removed fdash and fire-dash from $(DESTDIR)$(BINDIR)/"
 
 clean:
 	rm -f src/*.o $(TARGET)
