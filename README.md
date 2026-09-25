@@ -41,22 +41,21 @@ Running `fdash` without arguments (or typing `fdash monit`) opens the split-pane
 ╰──────────────────────────────────────────────────────────────────────────────────────────────────╯
 ```
 
-### Dashboard Shortcuts:
+### Dashboard Keyboard Shortcuts:
 - `↑` / `↓` or `k` / `j`: Navigate applications in table (or navigate/select log lines when in log mode)
-- `Mouse Click`: Click any log line to select it (or click an app to switch logs)
+- `←` / `→`: Switch focus between Process Table and Live Logs
+- `Tab`: Toggle focus between Process Table and Live Logs
 - `Enter` or `o`: Open **Log Detail Inspector** for selected log line (or toggle Fullscreen if no log is selected)
 - `m`: Insert a visual checkpoint marker (`─── [MARK: HH:MM:SS] ───`) **directly below the selected log line** (or at bottom if none selected)
 - `c`: Copy selected log payload to clipboard (`pbcopy` / `xclip` / `wl-copy`)
 - `a`: Quick-toggle between active single-app logs and unified `[ALL APPS]` stream
 - `f`: Toggle **Fullscreen Log View** (expands logs to full terminal height)
-- `Tab`: Switch focus between Process Table and Live Logs
 - `l`: Cycle log triage filter level: `ALL` ➔ `WARN+ERR` ➔ `ERR ONLY`
 - `/`: Interactive log search with instant keyword highlighting (`Esc` to cancel, `Enter` to commit)
 - `Space`: **Pause / Resume** live auto-scroll (buffers incoming logs in background)
-- `Trackpad / Mouse Wheel`: Smoothly scroll through logs up/down
-- `PageUp` / `PageDown` or `u` / `d`: Scroll through logs
-- `g`: Jump to oldest log line in buffer
-- `b` or `G`: Jump to bottom / resume auto-scroll
+- `PageUp` / `PageDown` or `u` / `d`: Scroll through logs (10 / 5 lines)
+- `Home` or `g`: Jump to oldest log line in buffer
+- `End` or `b` or `G`: Jump to bottom / resume auto-scroll
 - `s`: Start selected application (or all applications if `[ALL APPS]` is selected)
 - `x`: Stop selected application (or all applications if `[ALL APPS]` is selected)
 - `r`: Restart selected application (or all applications if `[ALL APPS]` is selected)

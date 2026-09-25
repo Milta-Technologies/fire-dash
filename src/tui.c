@@ -25,8 +25,8 @@ static void handle_winch(int sig) {
 
 static void disable_raw_mode(void) {
     if (!g_raw_enabled) return;
-    /* Disable mouse tracking, show cursor, restore main screen */
-    write(STDOUT_FILENO, "\033[?1006l\033[?1000l\033[?25h\033[?1049l", 28);
+    /* Ensure mouse tracking is disabled, show cursor, restore main screen */
+    write(STDOUT_FILENO, "\033[?1000l\033[?1002l\033[?1006l\033[?25h\033[?1049l", 35);
     tcsetattr(STDIN_FILENO, TCSAFLUSH, &orig_termios);
     g_raw_enabled = false;
 }
@@ -48,8 +48,8 @@ static void enable_raw_mode(void) {
     raw.c_cc[VTIME] = 1;
     tcsetattr(STDIN_FILENO, TCSAFLUSH, &raw);
 
-    /* Switch to alternate screen, hide cursor, enable SGR mouse tracking */
-    write(STDOUT_FILENO, "\033[?1049h\033[?25l\033[?1000h\033[?1006h", 28);
+    /* Switch to alternate screen, hide cursor, ensure mouse tracking is DISABLED */
+    write(STDOUT_FILENO, "\033[?1049h\033[?25l\033[?1000l\033[?1002l\033[?1006l", 35);
     g_raw_enabled = true;
     atexit(disable_raw_mode);
 }
@@ -378,7 +378,7 @@ static void render_dashboard(TUIState *state, ProcessInfo *apps, int app_count) 
         } else if (state->selected_log_idx >= 0) {
             sb_printf(&sb, " \033[38;5;220;1m[Line #%d Selected]\033[0m \033[38;5;244m[Enter/o] Details  [m] Mark Below  [c] Copy  [Esc] Unselect  [↑/↓] Navigate\033[0m\033[K\r\n", state->selected_log_idx + 1);
         } else {
-            sb_printf(&sb, "\033[38;5;244m [↑/↓/Click] Select Log  [f/Esc] Split View  [l] Level: %-8s  [Space] Pause  [m] Mark  [/] Search  [q] Quit\033[0m\033[K\r\n",
+            sb_printf(&sb, "\033[38;5;244m [↑/↓/j/k] Select Log  [f/Esc] Split View  [l] Level: %-8s  [Space] Pause  [m] Mark  [/] Search  [q] Quit\033[0m\033[K\r\n",
                       log_viewer_level_name(state->log_viewer.level_filter));
         }
 
@@ -501,8 +501,8 @@ static void render_dashboard(TUIState *state, ProcessInfo *apps, int app_count) 
             sb_printf(&sb, " \033[38;5;220;1m[Line #%d Selected]\033[0m \033[38;5;244m[Enter/o] Details  [m] Mark Below  [c] Copy  [Esc] Unselect  [↑/↓] Navigate\033[0m\033[K\r\n", state->selected_log_idx + 1);
         } else {
             const char *focus_hint = (state->focus == FOCUS_LOGS)
-                                     ? "\033[38;5;214;1m[Tab] Focus: LOGS (↑/↓/Wheel select)\033[0m"
-                                     : "\033[38;5;48;1m[Tab] Focus: APPS (↑/↓ select)\033[0m";
+                                     ? "\033[38;5;214;1m[Tab] Focus: LOGS (↑/↓/j/k navigate)\033[0m"
+                                     : "\033[38;5;48;1m[Tab] Focus: APPS (↑/↓/j/k select)\033[0m";
             sb_printf(&sb, " %s  \033[38;5;244m[a] All-Apps  [f/Enter] Fullscreen  [l] Level  [/] Search  [Space] Pause  [m] Mark  [q] Quit\033[0m\033[K\r\n", focus_hint);
         }
 
@@ -700,7 +700,23 @@ int tui_run(SystemdScope scope) {
 
                 /* 1. If Log Detail Inspector is currently open */
                 if (state.show_detail) {
-                    if (c == 27 || c == 'q' || c == 'Q' || c == '\r' || c == '\n' || c == 'o') {
+                    if (c == 27) {
+                        char seq[3];
+                        if (read(STDIN_FILENO, &seq[0], 1) == 1 &&
+                            read(STDIN_FILENO, &seq[1], 1) == 1) {
+                            if (seq[0] == '[' || seq[0] == 'O') {
+                                if (seq[1] == 'A') { /* Up Arrow */
+                                    if (state.selected_log_idx > 0) state.selected_log_idx--;
+                                    continue;
+                                } else if (seq[1] == 'B') { /* Down Arrow */
+                                    if (state.selected_log_idx < match_count - 1) state.selected_log_idx++;
+                                    continue;
+                                }
+                            }
+                        }
+                        state.show_detail = false;
+                        set_status(&state, "Closed Log Inspector");
+                    } else if (c == 'q' || c == 'Q' || c == '\r' || c == '\n' || c == 'o') {
                         state.show_detail = false;
                         set_status(&state, "Closed Log Inspector");
                     } else if (c == 'c' || c == 'C') {
@@ -809,72 +825,7 @@ int tui_run(SystemdScope scope) {
                     if (read(STDIN_FILENO, &seq[0], 1) == 1 &&
                         read(STDIN_FILENO, &seq[1], 1) == 1) {
                         if (seq[0] == '[') {
-                            if (seq[1] == '<') {
-                                /* SGR Mouse reporting: \033[<btn;col;rowM or m */
-                                char mbuf[64];
-                                int mlen = 0;
-                                char mc;
-                                while (mlen < (int)sizeof(mbuf) - 1) {
-                                    if (read(STDIN_FILENO, &mc, 1) != 1) break;
-                                    mbuf[mlen++] = mc;
-                                    if (mc == 'M' || mc == 'm') break;
-                                }
-                                mbuf[mlen] = '\0';
-
-                                int btn = 0, m_col = 0, m_row = 0;
-                                char m_type = mc;
-                                sscanf(mbuf, "%d;%d;%d%c", &btn, &m_col, &m_row, &m_type);
-
-                                if (btn == 64) {
-                                    /* Wheel Up */
-                                    log_viewer_scroll_up(&state.log_viewer, 3);
-                                } else if (btn == 65) {
-                                    /* Wheel Down */
-                                    log_viewer_scroll_down(&state.log_viewer, 3);
-                                } else if (btn == 0 && m_type == 'M') {
-                                    /* Left Click */
-                                    int table_max_rows = (state.rows - 8) / 2;
-                                    if (table_max_rows < 4) table_max_rows = 4;
-
-                                    int log_start_row = state.fullscreen_logs ? 4 : (6 + table_max_rows);
-                                    int log_avail = state.fullscreen_logs ? (state.rows - 4) : (state.rows - (5 + table_max_rows + 4));
-                                    if (log_avail < 4) log_avail = 4;
-
-                                    if (m_row >= log_start_row && m_row < log_start_row + log_avail) {
-                                        /* Clicked inside log viewport */
-                                        int end_idx = match_count - lv->scroll_offset;
-                                        if (end_idx < 0) end_idx = 0;
-                                        int start_idx = end_idx - log_avail;
-                                        if (start_idx < 0) start_idx = 0;
-
-                                        int clicked_match = start_idx + (m_row - log_start_row);
-                                        if (clicked_match >= 0 && clicked_match < match_count && clicked_match < end_idx) {
-                                            if (state.selected_log_idx == clicked_match) {
-                                                /* Clicked already selected line: open detail inspector */
-                                                state.show_detail = true;
-                                                state.detail_scroll = 0;
-                                            } else {
-                                                state.selected_log_idx = clicked_match;
-                                                state.focus = FOCUS_LOGS;
-                                                state.log_viewer.auto_scroll = false;
-                                                set_status(&state, "Selected line #%d. Press [Enter/o] for details, [m] to mark below.", clicked_match + 1);
-                                            }
-                                        }
-                                    } else if (!state.fullscreen_logs && m_row >= 4 && m_row < 4 + table_max_rows) {
-                                        /* Clicked inside process table */
-                                        int visible_start = 0;
-                                        if (state.selected_idx >= table_max_rows) {
-                                            visible_start = state.selected_idx - table_max_rows + 1;
-                                        }
-                                        int clicked_item = visible_start + (m_row - 4);
-                                        if (clicked_item < total_items) {
-                                            state.selected_idx = clicked_item;
-                                            state.focus = FOCUS_PROCESSES;
-                                            state.selected_log_idx = -1;
-                                        }
-                                    }
-                                }
-                            } else if (seq[1] == 'A') { /* Up Arrow */
+                            if (seq[1] == 'A') { /* Up Arrow */
                                 if (is_log_mode) {
                                     if (state.selected_log_idx == -1) {
                                         state.selected_log_idx = (match_count > 0) ? (match_count - 1) : -1;
@@ -910,12 +861,39 @@ int tui_run(SystemdScope scope) {
                                 } else {
                                     if (state.selected_idx < total_items - 1) state.selected_idx++;
                                 }
+                            } else if (seq[1] == 'C') { /* Right Arrow -> Switch focus to Logs */
+                                if (!state.fullscreen_logs) {
+                                    state.focus = FOCUS_LOGS;
+                                    set_status(&state, "Focus: LOGS (↑/↓/j/k to select line, Tab to switch)");
+                                }
+                            } else if (seq[1] == 'D') { /* Left Arrow -> Switch focus to Processes */
+                                if (!state.fullscreen_logs) {
+                                    state.focus = FOCUS_PROCESSES;
+                                    state.selected_log_idx = -1;
+                                    set_status(&state, "Focus: PROCESSES (↑/↓/j/k to select app, Tab to switch)");
+                                }
                             } else if (seq[1] == '5') { /* Page Up */
-                                read(STDIN_FILENO, &seq[2], 1);
+                                read(STDIN_FILENO, &seq[2], 1); /* consume ~ */
                                 log_viewer_scroll_up(&state.log_viewer, 10);
                             } else if (seq[1] == '6') { /* Page Down */
-                                read(STDIN_FILENO, &seq[2], 1);
+                                read(STDIN_FILENO, &seq[2], 1); /* consume ~ */
                                 log_viewer_scroll_down(&state.log_viewer, 10);
+                            } else if (seq[1] == 'H' || seq[1] == '1' || seq[1] == '7') { /* Home */
+                                if (seq[1] != 'H') read(STDIN_FILENO, &seq[2], 1); /* consume ~ */
+                                if (is_log_mode) {
+                                    log_viewer_scroll_up(&state.log_viewer, state.log_viewer.count);
+                                    state.selected_log_idx = 0;
+                                } else {
+                                    state.selected_idx = 0;
+                                }
+                            } else if (seq[1] == 'F' || seq[1] == '4' || seq[1] == '8') { /* End */
+                                if (seq[1] != 'F') read(STDIN_FILENO, &seq[2], 1); /* consume ~ */
+                                if (is_log_mode) {
+                                    state.selected_log_idx = -1;
+                                    log_viewer_scroll_to_bottom(&state.log_viewer);
+                                } else {
+                                    state.selected_idx = total_items - 1;
+                                }
                             }
                         } else if (seq[0] == 'O') {
                             if (seq[1] == 'A') {
@@ -928,6 +906,31 @@ int tui_run(SystemdScope scope) {
                                     if (state.selected_log_idx >= 0 && state.selected_log_idx < match_count - 1) state.selected_log_idx++;
                                     else { state.selected_log_idx = -1; state.log_viewer.auto_scroll = true; }
                                 } else if (state.selected_idx < total_items - 1) state.selected_idx++;
+                            } else if (seq[1] == 'C') {
+                                if (!state.fullscreen_logs) {
+                                    state.focus = FOCUS_LOGS;
+                                    set_status(&state, "Focus: LOGS");
+                                }
+                            } else if (seq[1] == 'D') {
+                                if (!state.fullscreen_logs) {
+                                    state.focus = FOCUS_PROCESSES;
+                                    state.selected_log_idx = -1;
+                                    set_status(&state, "Focus: PROCESSES");
+                                }
+                            } else if (seq[1] == 'H') {
+                                if (is_log_mode) {
+                                    log_viewer_scroll_up(&state.log_viewer, state.log_viewer.count);
+                                    state.selected_log_idx = 0;
+                                } else {
+                                    state.selected_idx = 0;
+                                }
+                            } else if (seq[1] == 'F') {
+                                if (is_log_mode) {
+                                    state.selected_log_idx = -1;
+                                    log_viewer_scroll_to_bottom(&state.log_viewer);
+                                } else {
+                                    state.selected_idx = total_items - 1;
+                                }
                             }
                         }
                     } else {
@@ -966,10 +969,10 @@ int tui_run(SystemdScope scope) {
                     if (!state.fullscreen_logs) {
                         state.focus = (state.focus == FOCUS_PROCESSES) ? FOCUS_LOGS : FOCUS_PROCESSES;
                         if (state.focus == FOCUS_LOGS) {
-                            set_status(&state, "Focus: LOGS (↑/↓/Click to select line, Tab to switch)");
+                            set_status(&state, "Focus: LOGS (↑/↓/j/k to select line, Tab to switch)");
                         } else {
                             state.selected_log_idx = -1;
-                            set_status(&state, "Focus: PROCESSES (↑/↓ to select app, Tab to switch)");
+                            set_status(&state, "Focus: PROCESSES (↑/↓/j/k to select app, Tab to switch)");
                         }
                     }
                 } else if (c == '/') {
