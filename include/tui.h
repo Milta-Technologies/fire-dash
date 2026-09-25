@@ -16,6 +16,9 @@ typedef struct {
     int last_app_idx;       /* Last non-zero selected app index */
     bool fullscreen_logs;   /* Toggle between 50/50 split and fullscreen logs */
     TUIFocus focus;
+    int selected_log_idx;   /* -1 = none / live tail, >=0 = index in matched lines */
+    bool show_detail;       /* True if Log Detail Inspector modal is open */
+    int detail_scroll;      /* Vertical scroll offset in inspector */
     bool search_mode;
     char search_input[128];
     char status_msg[128];

@@ -142,6 +142,13 @@ static void test_log_viewer_core(void) {
     /* Should format app badge */
     assert(strstr(formatted, "milta-back") != NULL);
 
+    /* Test inserting marker after specific line */
+    int prev_count = lv.count;
+    log_viewer_insert_marker_after(&lv, 1);
+    assert(lv.count == prev_count + 1);
+    assert(lv.lines[2].is_marker == true);
+    assert(strstr(lv.lines[2].text, "MARK:") != NULL);
+
     log_viewer_cleanup(&lv);
     printf("PASS\n");
 }

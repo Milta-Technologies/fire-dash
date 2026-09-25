@@ -1,6 +1,7 @@
 #include "tui.h"
 #include "dbus_systemd.h"
 #include "unit_gen.h"
+#include "cJSON.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -133,12 +134,150 @@ static void set_status(TUIState *state, const char *fmt, ...) {
     state->status_msg_time = time(NULL);
 }
 
+static bool copy_to_clipboard(const char *text) {
+    if (!text || !*text) return false;
+    FILE *fp = popen("pbcopy 2>/dev/null || wl-copy 2>/dev/null || xclip -selection clipboard 2>/dev/null || xsel --clipboard --input 2>/dev/null", "w");
+    if (!fp) return false;
+    fputs(text, fp);
+    pclose(fp);
+    return true;
+}
+
+static char *format_json_if_present(const char *text) {
+    if (!text) return NULL;
+    const char *start = strchr(text, '{');
+    const char *end = strrchr(text, '}');
+    if (!start || !end || end <= start) return NULL;
+
+    size_t len = (size_t)(end - start + 1);
+    char *copy = malloc(len + 1);
+    if (!copy) return NULL;
+    memcpy(copy, start, len);
+    copy[len] = '\0';
+
+    cJSON *json = cJSON_Parse(copy);
+    free(copy);
+    if (!json) return NULL;
+
+    char *printed = cJSON_Print(json);
+    cJSON_Delete(json);
+    return printed;
+}
+
+/* Detail Inspector Full-screen Overlay */
+static void render_detail_inspector(ScreenBuffer *sb, TUIState *state, LogLine *ll, int match_idx, int match_total) {
+    int cols = state->cols;
+    int rows = state->rows;
+
+    sb_append(sb, "\033[H", 3);
+
+    time_t now = time(NULL);
+    struct tm *tm_info = localtime(&now);
+    char time_str[32];
+    strftime(time_str, sizeof(time_str), "%H:%M:%S", tm_info);
+
+    /* Row 1: Header */
+    sb_printf(sb, "\033[38;5;208;1m🔥 fdash\033[0m \033[38;5;244mv%s\033[0m", FIRE_VERSION);
+    sb_printf(sb, "  \033[38;5;240m│\033[0m  \033[48;5;236;38;5;220;1m 🔍 LOG DETAIL INSPECTOR \033[0m");
+    sb_printf(sb, "  \033[38;5;240m│\033[0m  Line \033[38;5;51;1m#%d\033[0m of \033[38;5;244m%d\033[0m", match_idx + 1, match_total);
+
+    int cur_len = 54 + 12;
+    int pad = cols - cur_len - (int)strlen(time_str);
+    if (pad > 0) {
+        for (int i = 0; i < pad; i++) sb_append(sb, " ", 1);
+    }
+    sb_printf(sb, "\033[38;5;244m%s\033[0m\033[K\r\n", time_str);
+
+    /* Row 2: Separator */
+    sb_append(sb, "\033[38;5;238m", 11);
+    for (int i = 0; i < cols; i++) sb_append(sb, "─", 3);
+    sb_append(sb, "\033[0m\033[K\r\n", 7);
+
+    /* Row 3: Metadata bar */
+    const char *sev_badge = "\033[38;5;48;1m● INFO / OK\033[0m";
+    if (ll->is_err) {
+        sev_badge = "\033[38;5;196;1m● ERROR / FATAL\033[0m";
+    } else if (ll->is_warn) {
+        sev_badge = "\033[38;5;220;1m▲ WARNING\033[0m";
+    } else if (ll->is_marker) {
+        sev_badge = "\033[38;5;213;1m❖ CHECKPOINT MARKER\033[0m";
+    }
+
+    static const int palette[] = { 39, 76, 214, 207, 45, 220, 141, 48 };
+    unsigned int h = 5381;
+    for (const char *p = ll->app_name; *p; p++) h = ((h << 5) + h) + (unsigned char)*p;
+    int app_col = palette[h % 8];
+
+    sb_printf(sb, "  App: \033[38;5;%d;1m[%s]\033[0m   Severity: %s   Length: \033[38;5;244m%lu chars\033[0m\033[K\r\n",
+              app_col, ll->app_name[0] ? ll->app_name : "system", sev_badge, (unsigned long)strlen(ll->text));
+
+    /* Row 4: Separator */
+    sb_append(sb, "\033[38;5;238m", 11);
+    for (int i = 0; i < cols; i++) sb_append(sb, "─", 3);
+    sb_append(sb, "\033[0m\033[K\r\n", 7);
+
+    /* Content Area */
+    int content_rows = rows - 7;
+    if (content_rows < 6) content_rows = 6;
+    int printed_rows = 0;
+
+    sb_printf(sb, " \033[38;5;248;1m[RAW LOG PAYLOAD]\033[0m\033[K\r\n");
+    printed_rows++;
+
+    /* Wrap raw text */
+    const char *raw = ll->text;
+    size_t raw_len = strlen(raw);
+    size_t offset = 0;
+    int wrap_width = cols - 6;
+    if (wrap_width < 20) wrap_width = 20;
+
+    while (offset < raw_len && printed_rows < content_rows - 4) {
+        size_t chunk = raw_len - offset;
+        if ((int)chunk > wrap_width) chunk = wrap_width;
+
+        const char *color = ll->is_err ? "\033[38;5;203m" : (ll->is_warn ? "\033[38;5;222m" : "\033[38;5;253m");
+        sb_printf(sb, "   %s%.*s\033[0m\033[K\r\n", color, (int)chunk, raw + offset);
+        offset += chunk;
+        printed_rows++;
+    }
+
+    /* Formatted JSON check */
+    char *pretty_json = format_json_if_present(ll->text);
+    if (pretty_json && printed_rows < content_rows - 2) {
+        sb_append(sb, "\r\n", 2);
+        printed_rows++;
+        sb_printf(sb, " \033[38;5;51;1m[PARSED JSON STRUCTURE]\033[0m\033[K\r\n");
+        printed_rows++;
+
+        char *line = strtok(pretty_json, "\r\n");
+        while (line && printed_rows < content_rows) {
+            sb_printf(sb, "   \033[38;5;141m%.*s\033[0m\033[K\r\n", cols - 6, line);
+            printed_rows++;
+            line = strtok(NULL, "\r\n");
+        }
+        cJSON_free(pretty_json);
+    }
+
+    for (; printed_rows < content_rows; printed_rows++) {
+        sb_append(sb, "\033[K\r\n", 5);
+    }
+
+    /* Footer separator */
+    sb_append(sb, "\033[38;5;238m", 11);
+    for (int i = 0; i < cols; i++) sb_append(sb, "─", 3);
+    sb_append(sb, "\033[0m\033[K\r\n", 7);
+
+    /* Footer actions */
+    if (state->status_msg[0] && (time(NULL) - state->status_msg_time < 4)) {
+        sb_printf(sb, " \033[38;5;226;1m⚡ %s\033[0m\033[K", state->status_msg);
+    } else {
+        sb_printf(sb, " \033[38;5;244m[m] Insert Marker Below  [c] Copy to Clipboard  [↑/k] Prev Line  [↓/j] Next Line  [Esc/Enter/q] Close\033[0m\033[K");
+    }
+}
+
 static void render_dashboard(TUIState *state, ProcessInfo *apps, int app_count) {
     ScreenBuffer sb;
     sb_init(&sb);
-
-    /* Move cursor to 1,1 */
-    sb_append(&sb, "\033[H", 3);
 
     int cols = state->cols;
     int rows = state->rows;
@@ -163,13 +302,54 @@ static void render_dashboard(TUIState *state, ProcessInfo *apps, int app_count) 
     char total_mem_str[32];
     format_mem(total_mem, total_mem_str, sizeof(total_mem_str));
 
-    int total_items = app_count + 1; /* index 0 is [ALL APPS], 1..app_count are apps[0..app_count-1] */
+    int total_items = app_count + 1;
+    LogViewer *lv = &state->log_viewer;
+
+    /* Collect filtered line indices */
+    int matching_indices[MAX_LOG_LINES];
+    int match_count = 0;
+
+    for (int i = 0; i < lv->count; i++) {
+        int real_idx = (lv->head + i) % MAX_LOG_LINES;
+        LogLine *ll = &lv->lines[real_idx];
+
+        if (ll->is_marker) {
+            matching_indices[match_count++] = real_idx;
+            continue;
+        }
+
+        if (lv->level_filter == LOG_LEVEL_ERR_ONLY && !ll->is_err) {
+            continue;
+        }
+        if (lv->level_filter == LOG_LEVEL_WARN_ERR && !ll->is_err && !ll->is_warn) {
+            continue;
+        }
+
+        if (lv->search_filter[0]) {
+            if (strcasestr(ll->text, lv->search_filter) == NULL &&
+                strcasestr(ll->app_name, lv->search_filter) == NULL) {
+                continue;
+            }
+        }
+
+        matching_indices[match_count++] = real_idx;
+    }
+
+    /* If Log Detail Inspector is open */
+    if (state->show_detail && state->selected_log_idx >= 0 && state->selected_log_idx < match_count) {
+        render_detail_inspector(&sb, state, &lv->lines[matching_indices[state->selected_log_idx]], state->selected_log_idx, match_count);
+        write(STDOUT_FILENO, sb.data, sb.len);
+        sb_free(&sb);
+        return;
+    }
+
+    /* Move cursor to 1,1 */
+    sb_append(&sb, "\033[H", 3);
 
     int log_rows_avail = 4;
 
     if (state->fullscreen_logs) {
         /* FULLSCREEN LOGS VIEW */
-        /* Row 1: Compact Header */
         sb_printf(&sb, "\033[38;5;208;1m🔥 fdash\033[0m \033[38;5;244mv%s\033[0m", FIRE_VERSION);
         sb_printf(&sb, "  \033[38;5;240m│\033[0m  Scope: \033[38;5;51;1m%s\033[0m",
                   state->scope == SCOPE_SYSTEM ? "SYSTEM" : "USER");
@@ -184,11 +364,12 @@ static void render_dashboard(TUIState *state, ProcessInfo *apps, int app_count) 
         }
         sb_printf(&sb, "\033[38;5;244m%s\033[0m\033[K\r\n", time_str);
 
-        /* Row 2: Status bar or Controls in Fullscreen */
         if (state->status_msg[0] && (time(NULL) - state->status_msg_time < 4)) {
             sb_printf(&sb, " \033[38;5;226;1m⚡ %s\033[0m\033[K\r\n", state->status_msg);
+        } else if (state->selected_log_idx >= 0) {
+            sb_printf(&sb, " \033[38;5;220;1m[Line #%d Selected]\033[0m \033[38;5;244m[Enter/o] Details  [m] Mark Below  [c] Copy  [Esc] Unselect  [↑/↓] Navigate\033[0m\033[K\r\n", state->selected_log_idx + 1);
         } else {
-            sb_printf(&sb, "\033[38;5;244m [↑/↓/Wheel] Scroll Logs  [f/Enter/Esc] Split View  [l] Level: %-8s  [Space] Pause  [/] Search  [q] Quit\033[0m\033[K\r\n",
+            sb_printf(&sb, "\033[38;5;244m [↑/↓/Click] Select Log  [f/Esc] Split View  [l] Level: %-8s  [Space] Pause  [m] Mark  [/] Search  [q] Quit\033[0m\033[K\r\n",
                       log_viewer_level_name(state->log_viewer.level_filter));
         }
 
@@ -196,7 +377,6 @@ static void render_dashboard(TUIState *state, ProcessInfo *apps, int app_count) 
         if (log_rows_avail < 4) log_rows_avail = 4;
     } else {
         /* 50/50 SPLIT DASHBOARD VIEW */
-        /* 1. Header Banner */
         sb_printf(&sb, "\033[38;5;208;1m🔥 fdash\033[0m \033[38;5;244mv%s\033[0m", FIRE_VERSION);
         sb_printf(&sb, "  \033[38;5;240m│\033[0m  Scope: \033[38;5;51;1m%s\033[0m",
                   state->scope == SCOPE_SYSTEM ? "SYSTEM (/etc)" : "USER (~/.config)");
@@ -210,16 +390,13 @@ static void render_dashboard(TUIState *state, ProcessInfo *apps, int app_count) 
         }
         sb_printf(&sb, "\033[38;5;244m%s\033[0m\033[K\r\n", time_str);
 
-        /* Separator */
         sb_append(&sb, "\033[38;5;238m", 11);
         for (int i = 0; i < cols; i++) sb_append(&sb, "─", 3);
         sb_append(&sb, "\033[0m\033[K\r\n", 7);
 
-        /* 2. Process Table */
         int table_max_rows = (rows - 8) / 2;
         if (table_max_rows < 4) table_max_rows = 4;
 
-        /* Table Header */
         const char *apps_header_tag = (state->focus == FOCUS_PROCESSES)
                                       ? "\033[38;5;48;1m[ACTIVE FOCUS]\033[0m"
                                       : "\033[38;5;240m[Tab to focus]\033[0m";
@@ -239,8 +416,7 @@ static void render_dashboard(TUIState *state, ProcessInfo *apps, int app_count) 
             }
 
             if (item_idx == 0) {
-                /* Entry 0: [ALL APPS] */
-                bool is_selected = (state->selected_idx == 0);
+                bool is_selected = (state->selected_idx == 0 && state->focus == FOCUS_PROCESSES);
                 char all_status[64];
                 if (running_count > 0) {
                     snprintf(all_status, sizeof(all_status), "\033[38;5;48;1m● active (%d)\033[0m", running_count);
@@ -266,10 +442,9 @@ static void render_dashboard(TUIState *state, ProcessInfo *apps, int app_count) 
                               "[ALL APPS]", all_status, "-", total_mem_str, count_str, watch_str);
                 }
             } else {
-                /* Process Entry */
                 int app_idx = item_idx - 1;
                 ProcessInfo *p = &apps[app_idx];
-                bool is_selected = (state->selected_idx == item_idx);
+                bool is_selected = (state->selected_idx == item_idx && state->focus == FOCUS_PROCESSES);
 
                 char mem_str[32];
                 format_mem(p->memory_bytes, mem_str, sizeof(mem_str));
@@ -307,16 +482,17 @@ static void render_dashboard(TUIState *state, ProcessInfo *apps, int app_count) 
             }
         }
 
-        /* 3. Middle Control / Status Bar */
         sb_append(&sb, "\033[38;5;238m", 11);
         for (int i = 0; i < cols; i++) sb_append(&sb, "─", 3);
         sb_append(&sb, "\033[0m\033[K\r\n", 7);
 
         if (state->status_msg[0] && (time(NULL) - state->status_msg_time < 4)) {
             sb_printf(&sb, " \033[38;5;226;1m⚡ %s\033[0m\033[K\r\n", state->status_msg);
+        } else if (state->selected_log_idx >= 0) {
+            sb_printf(&sb, " \033[38;5;220;1m[Line #%d Selected]\033[0m \033[38;5;244m[Enter/o] Details  [m] Mark Below  [c] Copy  [Esc] Unselect  [↑/↓] Navigate\033[0m\033[K\r\n", state->selected_log_idx + 1);
         } else {
             const char *focus_hint = (state->focus == FOCUS_LOGS)
-                                     ? "\033[38;5;214;1m[Tab] Focus: LOGS (↑/↓/Wheel scroll)\033[0m"
+                                     ? "\033[38;5;214;1m[Tab] Focus: LOGS (↑/↓/Wheel select)\033[0m"
                                      : "\033[38;5;48;1m[Tab] Focus: APPS (↑/↓ select)\033[0m";
             sb_printf(&sb, " %s  \033[38;5;244m[a] All-Apps  [f/Enter] Fullscreen  [l] Level  [/] Search  [Space] Pause  [m] Mark  [q] Quit\033[0m\033[K\r\n", focus_hint);
         }
@@ -336,14 +512,12 @@ static void render_dashboard(TUIState *state, ProcessInfo *apps, int app_count) 
     sb_printf(&sb, "\033[38;5;214;1mLogs: %s\033[0m \033[38;5;244m(%d lines)\033[0m ",
               selected_view_name, state->log_viewer.count);
 
-    /* Focus badge on logs if split view */
     if (!state->fullscreen_logs) {
         if (state->focus == FOCUS_LOGS) {
             sb_printf(&sb, "\033[48;5;214;38;5;16;1m[FOCUS: LOGS]\033[0m ");
         }
     }
 
-    /* Level filter indicator */
     if (state->log_viewer.level_filter == LOG_LEVEL_ERR_ONLY) {
         sb_printf(&sb, "\033[38;5;196;1m[Level: ERR ONLY]\033[0m ");
     } else if (state->log_viewer.level_filter == LOG_LEVEL_WARN_ERR) {
@@ -352,14 +526,12 @@ static void render_dashboard(TUIState *state, ProcessInfo *apps, int app_count) 
         sb_printf(&sb, "\033[38;5;244m[Level: ALL]\033[0m ");
     }
 
-    /* Search indicator */
     if (state->search_mode) {
         sb_printf(&sb, "\033[38;5;226;1m[Search: %s_]\033[0m ", state->search_input);
     } else if (state->log_viewer.search_filter[0]) {
         sb_printf(&sb, "\033[38;5;51m[Filter: \"%s\"]\033[0m ", state->log_viewer.search_filter);
     }
 
-    /* Auto-scroll / Pause indicator */
     if (state->log_viewer.is_paused) {
         sb_printf(&sb, "\033[48;5;208;38;5;16;1m[PAUSED +%d]\033[0m ", state->log_viewer.paused_buffered_count);
     } else if (state->log_viewer.auto_scroll) {
@@ -372,73 +544,45 @@ static void render_dashboard(TUIState *state, ProcessInfo *apps, int app_count) 
     sb_append(&sb, "╮\033[0m\033[K\r\n", 9);
 
     /* 5. Render Log Lines */
-    LogViewer *lv = &state->log_viewer;
     if (lv->count == 0) {
         sb_printf(&sb, "\033[38;5;242m  (No logs recorded yet. Start the process or trigger actions to view journal)\033[0m\033[K\r\n");
         for (int i = 1; i < log_rows_avail; i++) {
             sb_append(&sb, "\033[K\r\n", 5);
         }
+    } else if (match_count == 0) {
+        sb_printf(&sb, "\033[38;5;244m  No lines match active filter [level=%s, search='%s']\033[0m\033[K\r\n",
+                  log_viewer_level_name(lv->level_filter), lv->search_filter);
+        for (int i = 1; i < log_rows_avail; i++) {
+            sb_append(&sb, "\033[K\r\n", 5);
+        }
     } else {
-        /* Filter and collect lines */
-        int matching_indices[MAX_LOG_LINES];
-        int match_count = 0;
+        int end_idx = match_count - lv->scroll_offset;
+        if (end_idx < 0) end_idx = 0;
+        int start_idx = end_idx - log_rows_avail;
+        if (start_idx < 0) start_idx = 0;
 
-        for (int i = 0; i < lv->count; i++) {
-            int real_idx = (lv->head + i) % MAX_LOG_LINES;
+        int lines_printed = 0;
+        bool show_tag = lv->is_all_apps || (state->selected_idx == 0);
+
+        for (int i = start_idx; i < end_idx && lines_printed < log_rows_avail; i++) {
+            int real_idx = matching_indices[i];
             LogLine *ll = &lv->lines[real_idx];
+            bool is_selected_line = (state->selected_log_idx == i);
 
-            if (ll->is_marker) {
-                matching_indices[match_count++] = real_idx;
-                continue;
-            }
+            char formatted[2048];
+            int avail_w = cols - (is_selected_line ? 6 : 4);
+            log_viewer_format_colored_line(ll, lv->search_filter, show_tag, formatted, sizeof(formatted), avail_w);
 
-            /* Level filter */
-            if (lv->level_filter == LOG_LEVEL_ERR_ONLY && !ll->is_err) {
-                continue;
+            if (is_selected_line) {
+                sb_printf(&sb, "\033[48;5;237;38;5;220;1m► \033[0m\033[48;5;236m%s\033[0m\033[K\r\n", formatted);
+            } else {
+                sb_printf(&sb, "  %s\033[K\r\n", formatted);
             }
-            if (lv->level_filter == LOG_LEVEL_WARN_ERR && !ll->is_err && !ll->is_warn) {
-                continue;
-            }
-
-            /* Search filter */
-            if (lv->search_filter[0]) {
-                if (strcasestr(ll->text, lv->search_filter) == NULL &&
-                    strcasestr(ll->app_name, lv->search_filter) == NULL) {
-                    continue;
-                }
-            }
-
-            matching_indices[match_count++] = real_idx;
+            lines_printed++;
         }
 
-        if (match_count == 0) {
-            sb_printf(&sb, "\033[38;5;244m  No lines match active filter [level=%s, search='%s']\033[0m\033[K\r\n",
-                      log_viewer_level_name(lv->level_filter), lv->search_filter);
-            for (int i = 1; i < log_rows_avail; i++) {
-                sb_append(&sb, "\033[K\r\n", 5);
-            }
-        } else {
-            int end_idx = match_count - lv->scroll_offset;
-            if (end_idx < 0) end_idx = 0;
-            int start_idx = end_idx - log_rows_avail;
-            if (start_idx < 0) start_idx = 0;
-
-            int lines_printed = 0;
-            bool show_tag = lv->is_all_apps || (state->selected_idx == 0);
-
-            for (int i = start_idx; i < end_idx && lines_printed < log_rows_avail; i++) {
-                int real_idx = matching_indices[i];
-                LogLine *ll = &lv->lines[real_idx];
-
-                char formatted[2048];
-                log_viewer_format_colored_line(ll, lv->search_filter, show_tag, formatted, sizeof(formatted), cols - 4);
-                sb_printf(&sb, "  %s\033[K\r\n", formatted);
-                lines_printed++;
-            }
-
-            for (; lines_printed < log_rows_avail; lines_printed++) {
-                sb_append(&sb, "\033[K\r\n", 5);
-            }
+        for (; lines_printed < log_rows_avail; lines_printed++) {
+            sb_append(&sb, "\033[K\r\n", 5);
         }
     }
 
@@ -460,6 +604,9 @@ int tui_run(SystemdScope scope) {
     state.selected_idx = 0; /* Default to [ALL APPS] */
     state.last_app_idx = 1;
     state.fullscreen_logs = false;
+    state.selected_log_idx = -1; /* None selected by default (following live stream) */
+    state.show_detail = false;
+    state.detail_scroll = 0;
     state.log_viewer.auto_scroll = true;
     log_viewer_init(&state.log_viewer);
 
@@ -475,7 +622,6 @@ int tui_run(SystemdScope scope) {
     systemd_init(scope);
     systemd_list_all(scope, &apps, &app_count);
 
-    /* Start by viewing all apps */
     log_viewer_set_app(&state.log_viewer, "ALL", scope);
     char last_target[MAX_NAME_LEN] = "ALL";
 
@@ -517,6 +663,7 @@ int tui_run(SystemdScope scope) {
 
         if (strcmp(last_target, current_target) != 0) {
             snprintf(last_target, sizeof(last_target), "%s", current_target);
+            state.selected_log_idx = -1; /* Reset selected line on stream switch */
             if (state.selected_idx == 0) {
                 log_viewer_set_app(&state.log_viewer, "ALL", scope);
                 set_status(&state, "Switched to unified [ALL APPS] log stream");
@@ -535,15 +682,63 @@ int tui_run(SystemdScope scope) {
             char c;
             if (read(STDIN_FILENO, &c, 1) > 0) {
                 int total_items = app_count + 1;
-                bool scroll_logs = (state.fullscreen_logs || state.focus == FOCUS_LOGS);
+                LogViewer *lv = &state.log_viewer;
 
+                /* Compute matching indices for current frame */
+                int matching_indices[MAX_LOG_LINES];
+                int match_count = 0;
+                for (int i = 0; i < lv->count; i++) {
+                    int real_idx = (lv->head + i) % MAX_LOG_LINES;
+                    LogLine *ll = &lv->lines[real_idx];
+
+                    if (ll->is_marker) {
+                        matching_indices[match_count++] = real_idx;
+                        continue;
+                    }
+                    if (lv->level_filter == LOG_LEVEL_ERR_ONLY && !ll->is_err) continue;
+                    if (lv->level_filter == LOG_LEVEL_WARN_ERR && !ll->is_err && !ll->is_warn) continue;
+                    if (lv->search_filter[0]) {
+                        if (strcasestr(ll->text, lv->search_filter) == NULL &&
+                            strcasestr(ll->app_name, lv->search_filter) == NULL) {
+                            continue;
+                        }
+                    }
+                    matching_indices[match_count++] = real_idx;
+                }
+
+                /* 1. If Log Detail Inspector is currently open */
+                if (state.show_detail) {
+                    if (c == 27 || c == 'q' || c == 'Q' || c == '\r' || c == '\n' || c == 'o') {
+                        state.show_detail = false;
+                        set_status(&state, "Closed Log Inspector");
+                    } else if (c == 'c' || c == 'C') {
+                        if (state.selected_log_idx >= 0 && state.selected_log_idx < match_count) {
+                            int r_idx = matching_indices[state.selected_log_idx];
+                            copy_to_clipboard(lv->lines[r_idx].text);
+                            set_status(&state, "✔ Copied log payload to clipboard");
+                        }
+                    } else if (c == 'm' || c == 'M') {
+                        if (state.selected_log_idx >= 0 && state.selected_log_idx < match_count) {
+                            int r_idx = matching_indices[state.selected_log_idx];
+                            log_viewer_insert_marker_after(lv, r_idx);
+                            set_status(&state, "✔ Inserted checkpoint marker below line #%d", state.selected_log_idx + 1);
+                        }
+                    } else if (c == 'k') {
+                        if (state.selected_log_idx > 0) state.selected_log_idx--;
+                    } else if (c == 'j') {
+                        if (state.selected_log_idx < match_count - 1) state.selected_log_idx++;
+                    }
+                    continue;
+                }
+
+                /* 2. If in search input mode */
                 if (state.search_mode) {
-                    if (c == 27) { /* Escape: cancel search */
+                    if (c == 27) { /* Escape */
                         state.search_mode = false;
                         state.search_input[0] = '\0';
                         log_viewer_set_filter(&state.log_viewer, NULL);
                         set_status(&state, "Search cancelled");
-                    } else if (c == '\r' || c == '\n') { /* Enter: confirm search */
+                    } else if (c == '\r' || c == '\n') { /* Enter */
                         state.search_mode = false;
                         log_viewer_set_filter(&state.log_viewer, state.search_input);
                         set_status(&state, "Applied search: '%s'", state.search_input);
@@ -564,30 +759,52 @@ int tui_run(SystemdScope scope) {
                     continue;
                 }
 
-                if (c == 'q' || c == 'Q' || c == 3) { /* q or Ctrl+C */
+                /* 3. Normal Dashboard Navigation */
+                bool is_log_mode = (state.fullscreen_logs || state.focus == FOCUS_LOGS);
+
+                if (c == 'q' || c == 'Q' || c == 3) {
                     state.should_quit = true;
-                } else if (c == 'f') { /* f: Toggle Fullscreen logs */
+                } else if (c == 'f') {
                     state.fullscreen_logs = !state.fullscreen_logs;
                     set_status(&state, state.fullscreen_logs ? "Entered Fullscreen Log View" : "Exited Fullscreen Log View");
-                } else if (c == '\r' || c == '\n') { /* Enter: Toggle Fullscreen logs */
-                    state.fullscreen_logs = !state.fullscreen_logs;
-                    set_status(&state, state.fullscreen_logs ? "Entered Fullscreen Log View" : "Exited Fullscreen Log View");
-                } else if (c == ' ') { /* Spacebar: Toggle Pause live stream */
+                } else if (c == '\r' || c == '\n' || c == 'o') {
+                    if (state.selected_log_idx >= 0 && state.selected_log_idx < match_count) {
+                        /* Open detail inspector on selected line */
+                        state.show_detail = true;
+                        state.detail_scroll = 0;
+                    } else {
+                        /* Toggle fullscreen */
+                        state.fullscreen_logs = !state.fullscreen_logs;
+                        set_status(&state, state.fullscreen_logs ? "Entered Fullscreen Log View" : "Exited Fullscreen Log View");
+                    }
+                } else if (c == 'c' || c == 'C') {
+                    if (state.selected_log_idx >= 0 && state.selected_log_idx < match_count) {
+                        int r_idx = matching_indices[state.selected_log_idx];
+                        copy_to_clipboard(lv->lines[r_idx].text);
+                        set_status(&state, "✔ Copied selected log line to clipboard");
+                    }
+                } else if (c == ' ') {
                     log_viewer_toggle_pause(&state.log_viewer);
                     if (state.log_viewer.is_paused) {
                         set_status(&state, "Log stream PAUSED. Press [Space] to resume auto-scroll");
                     } else {
                         set_status(&state, "Log stream RESUMED (auto-scroll ON)");
                     }
-                } else if (c == 'm' || c == 'M') { /* m: Drop visual checkpoint marker */
-                    log_viewer_add_marker(&state.log_viewer);
-                    set_status(&state, "Inserted visual checkpoint marker");
-                } else if (c == 'l' || c == 'L') { /* l: Cycle log level filter */
+                } else if (c == 'm' || c == 'M') {
+                    if (state.selected_log_idx >= 0 && state.selected_log_idx < match_count) {
+                        int r_idx = matching_indices[state.selected_log_idx];
+                        log_viewer_insert_marker_after(&state.log_viewer, r_idx);
+                        set_status(&state, "✔ Inserted checkpoint marker below line #%d", state.selected_log_idx + 1);
+                    } else {
+                        log_viewer_add_marker(&state.log_viewer);
+                        set_status(&state, "Inserted visual checkpoint marker");
+                    }
+                } else if (c == 'l' || c == 'L') {
                     state.log_viewer.level_filter = (state.log_viewer.level_filter + 1) % 3;
+                    state.selected_log_idx = -1;
                     set_status(&state, "Log Triage Filter: %s", log_viewer_level_name(state.log_viewer.level_filter));
-                } else if (c == 'a' || c == 'A') { /* a: Toggle All-Apps stream */
+                } else if (c == 'a' || c == 'A') {
                     if (state.selected_idx == 0) {
-                        /* Switch back to last selected app */
                         state.selected_idx = (state.last_app_idx > 0 && state.last_app_idx < total_items)
                                              ? state.last_app_idx
                                              : (app_count > 0 ? 1 : 0);
@@ -601,7 +818,7 @@ int tui_run(SystemdScope scope) {
                         read(STDIN_FILENO, &seq[1], 1) == 1) {
                         if (seq[0] == '[') {
                             if (seq[1] == '<') {
-                                /* SGR Mouse reporting: \033[<btn;x;yM or m */
+                                /* SGR Mouse reporting: \033[<btn;col;rowM or m */
                                 char mbuf[64];
                                 int mlen = 0;
                                 char mc;
@@ -611,46 +828,123 @@ int tui_run(SystemdScope scope) {
                                     if (mc == 'M' || mc == 'm') break;
                                 }
                                 mbuf[mlen] = '\0';
-                                int btn = atoi(mbuf);
+
+                                int btn = 0, m_col = 0, m_row = 0;
+                                char m_type = mc;
+                                sscanf(mbuf, "%d;%d;%d%c", &btn, &m_col, &m_row, &m_type);
+
                                 if (btn == 64) {
-                                    /* Mouse wheel Up: smooth scroll logs */
+                                    /* Wheel Up */
                                     log_viewer_scroll_up(&state.log_viewer, 3);
                                 } else if (btn == 65) {
-                                    /* Mouse wheel Down: smooth scroll logs */
+                                    /* Wheel Down */
                                     log_viewer_scroll_down(&state.log_viewer, 3);
+                                } else if (btn == 0 && m_type == 'M') {
+                                    /* Left Click */
+                                    int table_max_rows = (state.rows - 8) / 2;
+                                    if (table_max_rows < 4) table_max_rows = 4;
+
+                                    int log_start_row = state.fullscreen_logs ? 4 : (6 + table_max_rows);
+                                    int log_avail = state.fullscreen_logs ? (state.rows - 4) : (state.rows - (5 + table_max_rows + 4));
+                                    if (log_avail < 4) log_avail = 4;
+
+                                    if (m_row >= log_start_row && m_row < log_start_row + log_avail) {
+                                        /* Clicked inside log viewport */
+                                        int end_idx = match_count - lv->scroll_offset;
+                                        if (end_idx < 0) end_idx = 0;
+                                        int start_idx = end_idx - log_avail;
+                                        if (start_idx < 0) start_idx = 0;
+
+                                        int clicked_match = start_idx + (m_row - log_start_row);
+                                        if (clicked_match >= 0 && clicked_match < match_count && clicked_match < end_idx) {
+                                            if (state.selected_log_idx == clicked_match) {
+                                                /* Clicked already selected line: open detail inspector */
+                                                state.show_detail = true;
+                                                state.detail_scroll = 0;
+                                            } else {
+                                                state.selected_log_idx = clicked_match;
+                                                state.focus = FOCUS_LOGS;
+                                                state.log_viewer.auto_scroll = false;
+                                                set_status(&state, "Selected line #%d. Press [Enter/o] for details, [m] to mark below.", clicked_match + 1);
+                                            }
+                                        }
+                                    } else if (!state.fullscreen_logs && m_row >= 4 && m_row < 4 + table_max_rows) {
+                                        /* Clicked inside process table */
+                                        int visible_start = 0;
+                                        if (state.selected_idx >= table_max_rows) {
+                                            visible_start = state.selected_idx - table_max_rows + 1;
+                                        }
+                                        int clicked_item = visible_start + (m_row - 4);
+                                        if (clicked_item < total_items) {
+                                            state.selected_idx = clicked_item;
+                                            state.focus = FOCUS_PROCESSES;
+                                            state.selected_log_idx = -1;
+                                        }
+                                    }
                                 }
                             } else if (seq[1] == 'A') { /* Up Arrow */
-                                if (scroll_logs) {
-                                    log_viewer_scroll_up(&state.log_viewer, 1);
+                                if (is_log_mode) {
+                                    if (state.selected_log_idx == -1) {
+                                        state.selected_log_idx = (match_count > 0) ? (match_count - 1) : -1;
+                                    } else if (state.selected_log_idx > 0) {
+                                        state.selected_log_idx--;
+                                    }
+                                    state.log_viewer.auto_scroll = false;
+
+                                    int log_avail = state.fullscreen_logs ? (state.rows - 4) : 4;
+                                    int end_idx = match_count - lv->scroll_offset;
+                                    int start_idx = end_idx - log_avail;
+                                    if (state.selected_log_idx < start_idx) {
+                                        log_viewer_scroll_up(&state.log_viewer, start_idx - state.selected_log_idx);
+                                    }
                                 } else {
                                     if (state.selected_idx > 0) state.selected_idx--;
                                 }
                             } else if (seq[1] == 'B') { /* Down Arrow */
-                                if (scroll_logs) {
-                                    log_viewer_scroll_down(&state.log_viewer, 1);
+                                if (is_log_mode) {
+                                    if (state.selected_log_idx >= 0) {
+                                        if (state.selected_log_idx < match_count - 1) {
+                                            state.selected_log_idx++;
+                                            int end_idx = match_count - lv->scroll_offset;
+                                            if (state.selected_log_idx >= end_idx) {
+                                                log_viewer_scroll_down(&state.log_viewer, state.selected_log_idx - end_idx + 1);
+                                            }
+                                        } else {
+                                            state.selected_log_idx = -1;
+                                            state.log_viewer.auto_scroll = true;
+                                            state.log_viewer.scroll_offset = 0;
+                                        }
+                                    }
                                 } else {
                                     if (state.selected_idx < total_items - 1) state.selected_idx++;
                                 }
                             } else if (seq[1] == '5') { /* Page Up */
-                                read(STDIN_FILENO, &seq[2], 1); /* consume ~ */
+                                read(STDIN_FILENO, &seq[2], 1);
                                 log_viewer_scroll_up(&state.log_viewer, 10);
                             } else if (seq[1] == '6') { /* Page Down */
-                                read(STDIN_FILENO, &seq[2], 1); /* consume ~ */
+                                read(STDIN_FILENO, &seq[2], 1);
                                 log_viewer_scroll_down(&state.log_viewer, 10);
                             }
                         } else if (seq[0] == 'O') {
-                            /* SS3 mode for arrow keys */
                             if (seq[1] == 'A') {
-                                if (scroll_logs) log_viewer_scroll_up(&state.log_viewer, 1);
-                                else if (state.selected_idx > 0) state.selected_idx--;
+                                if (is_log_mode) {
+                                    if (state.selected_log_idx == -1) state.selected_log_idx = (match_count > 0) ? (match_count - 1) : -1;
+                                    else if (state.selected_log_idx > 0) state.selected_log_idx--;
+                                } else if (state.selected_idx > 0) state.selected_idx--;
                             } else if (seq[1] == 'B') {
-                                if (scroll_logs) log_viewer_scroll_down(&state.log_viewer, 1);
-                                else if (state.selected_idx < total_items - 1) state.selected_idx++;
+                                if (is_log_mode) {
+                                    if (state.selected_log_idx >= 0 && state.selected_log_idx < match_count - 1) state.selected_log_idx++;
+                                    else { state.selected_log_idx = -1; state.log_viewer.auto_scroll = true; }
+                                } else if (state.selected_idx < total_items - 1) state.selected_idx++;
                             }
                         }
                     } else {
                         /* Plain ESC key */
-                        if (state.fullscreen_logs) {
+                        if (state.selected_log_idx >= 0) {
+                            state.selected_log_idx = -1;
+                            state.log_viewer.auto_scroll = true;
+                            set_status(&state, "Unselected line (live auto-scroll resumed)");
+                        } else if (state.fullscreen_logs) {
                             state.fullscreen_logs = false;
                             set_status(&state, "Exited Fullscreen Log View");
                         } else if (state.log_viewer.search_filter[0]) {
@@ -662,14 +956,17 @@ int tui_run(SystemdScope scope) {
                         }
                     }
                 } else if (c == 'k') {
-                    if (scroll_logs) {
-                        log_viewer_scroll_up(&state.log_viewer, 1);
+                    if (is_log_mode) {
+                        if (state.selected_log_idx == -1) state.selected_log_idx = (match_count > 0) ? (match_count - 1) : -1;
+                        else if (state.selected_log_idx > 0) state.selected_log_idx--;
+                        state.log_viewer.auto_scroll = false;
                     } else {
                         if (state.selected_idx > 0) state.selected_idx--;
                     }
                 } else if (c == 'j') {
-                    if (scroll_logs) {
-                        log_viewer_scroll_down(&state.log_viewer, 1);
+                    if (is_log_mode) {
+                        if (state.selected_log_idx >= 0 && state.selected_log_idx < match_count - 1) state.selected_log_idx++;
+                        else { state.selected_log_idx = -1; state.log_viewer.auto_scroll = true; }
                     } else {
                         if (state.selected_idx < total_items - 1) state.selected_idx++;
                     }
@@ -677,9 +974,10 @@ int tui_run(SystemdScope scope) {
                     if (!state.fullscreen_logs) {
                         state.focus = (state.focus == FOCUS_PROCESSES) ? FOCUS_LOGS : FOCUS_PROCESSES;
                         if (state.focus == FOCUS_LOGS) {
-                            set_status(&state, "Focus: LOGS (↑/↓/Wheel scroll logs, Tab to switch)");
+                            set_status(&state, "Focus: LOGS (↑/↓/Click to select line, Tab to switch)");
                         } else {
-                            set_status(&state, "Focus: PROCESSES (↑/↓ select app, Tab to switch)");
+                            state.selected_log_idx = -1;
+                            set_status(&state, "Focus: PROCESSES (↑/↓ to select app, Tab to switch)");
                         }
                     }
                 } else if (c == '/') {
@@ -690,9 +988,11 @@ int tui_run(SystemdScope scope) {
                 } else if (c == 'd' || c == 'n') {
                     log_viewer_scroll_down(&state.log_viewer, 5);
                 } else if (c == 'b' || c == 'G') {
+                    state.selected_log_idx = -1;
                     log_viewer_scroll_to_bottom(&state.log_viewer);
                 } else if (c == 'g') {
                     log_viewer_scroll_up(&state.log_viewer, state.log_viewer.count);
+                    state.selected_log_idx = 0;
                 } else if (c == 's') {
                     if (state.selected_idx == 0) {
                         set_status(&state, "Starting all %d registered services...", app_count);
@@ -746,7 +1046,6 @@ int tui_run(SystemdScope scope) {
                         unit_gen_delete(name, scope, NULL, 0);
                         systemd_daemon_reload(scope);
                         set_status(&state, "Deleted '%s'", name);
-                        /* Refresh list immediately */
                         systemd_free_list(apps, app_count);
                         apps = NULL;
                         app_count = 0;

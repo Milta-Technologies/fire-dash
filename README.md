@@ -42,13 +42,18 @@ Running `fdash` without arguments (or typing `fdash monit`) opens the split-pane
 ```
 
 ### Dashboard Shortcuts:
-- `↑` / `↓` or `k` / `j`: Navigate applications in table (Index 0 is `[ALL APPS]`)
+- `↑` / `↓` or `k` / `j`: Navigate applications in table (or navigate/select log lines when in log mode)
+- `Mouse Click`: Click any log line to select it (or click an app to switch logs)
+- `Enter` or `o`: Open **Log Detail Inspector** for selected log line (or toggle Fullscreen if no log is selected)
+- `m`: Insert a visual checkpoint marker (`─── [MARK: HH:MM:SS] ───`) **directly below the selected log line** (or at bottom if none selected)
+- `c`: Copy selected log payload to clipboard (`pbcopy` / `xclip` / `wl-copy`)
 - `a`: Quick-toggle between active single-app logs and unified `[ALL APPS]` stream
-- `f` or `Enter`: Toggle **Fullscreen Log View** (expands logs to full terminal height)
+- `f`: Toggle **Fullscreen Log View** (expands logs to full terminal height)
+- `Tab`: Switch focus between Process Table and Live Logs
 - `l`: Cycle log triage filter level: `ALL` ➔ `WARN+ERR` ➔ `ERR ONLY`
 - `/`: Interactive log search with instant keyword highlighting (`Esc` to cancel, `Enter` to commit)
 - `Space`: **Pause / Resume** live auto-scroll (buffers incoming logs in background)
-- `m`: Insert a visual checkpoint marker (`─── [MARK: HH:MM:SS] ───`)
+- `Trackpad / Mouse Wheel`: Smoothly scroll through logs up/down
 - `PageUp` / `PageDown` or `u` / `d`: Scroll through logs
 - `g`: Jump to oldest log line in buffer
 - `b` or `G`: Jump to bottom / resume auto-scroll
@@ -56,7 +61,7 @@ Running `fdash` without arguments (or typing `fdash monit`) opens the split-pane
 - `x`: Stop selected application (or all applications if `[ALL APPS]` is selected)
 - `r`: Restart selected application (or all applications if `[ALL APPS]` is selected)
 - `d`: Delete service unit and unregister from systemd
-- `Esc`: Clear search filter, reset triage level, or exit fullscreen mode
+- `Esc`: Unselect log line, close Inspector, exit fullscreen, or clear search filter
 - `q` or `Ctrl+C`: Exit dashboard
 
 ---

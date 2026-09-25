@@ -58,6 +58,7 @@ const char *log_viewer_level_name(LogViewerLevel level);
 /* Stream controls */
 void log_viewer_toggle_pause(LogViewer *lv);
 void log_viewer_add_marker(LogViewer *lv);
+void log_viewer_insert_marker_after(LogViewer *lv, int real_line_idx);
 
 /* Scroll navigation */
 void log_viewer_scroll_up(LogViewer *lv, int delta);

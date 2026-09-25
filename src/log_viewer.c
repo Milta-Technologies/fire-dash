@@ -77,6 +77,46 @@ void log_viewer_add_marker(LogViewer *lv) {
     }
 }
 
+void log_viewer_insert_marker_after(LogViewer *lv, int real_line_idx) {
+    if (!lv || lv->count == 0) return;
+    if (real_line_idx < 0 || real_line_idx >= MAX_LOG_LINES) return;
+
+    time_t now = time(NULL);
+    struct tm *tm_info = localtime(&now);
+    char time_str[32];
+    strftime(time_str, sizeof(time_str), "%H:%M:%S", tm_info);
+
+    char marker_text[128];
+    snprintf(marker_text, sizeof(marker_text), "─── [MARK: %s] ─── (triage checkpoint)", time_str);
+
+    /* Calculate logical position relative to write head */
+    int logical_k = (real_line_idx - lv->head + MAX_LOG_LINES) % MAX_LOG_LINES;
+    if (logical_k >= lv->count) logical_k = lv->count - 1;
+
+    int insert_logical = logical_k + 1;
+
+    if (lv->count < MAX_LOG_LINES) {
+        lv->count++;
+    } else {
+        /* Drop oldest line */
+        lv->head = (lv->head + 1) % MAX_LOG_LINES;
+        if (insert_logical > 0) insert_logical--;
+    }
+
+    /* Shift lines after insertion slot forward */
+    for (int i = lv->count - 1; i > insert_logical; i--) {
+        int dest = (lv->head + i) % MAX_LOG_LINES;
+        int src = (lv->head + i - 1) % MAX_LOG_LINES;
+        lv->lines[dest] = lv->lines[src];
+    }
+
+    int insert_slot = (lv->head + insert_logical) % MAX_LOG_LINES;
+    LogLine *ll = &lv->lines[insert_slot];
+    memset(ll, 0, sizeof(*ll));
+    snprintf(ll->text, sizeof(ll->text), "%s", marker_text);
+    ll->is_marker = true;
+}
+
 static void extract_app_name(const char *text, char *out, size_t out_cap) {
     out[0] = '\0';
     if (!text) return;
