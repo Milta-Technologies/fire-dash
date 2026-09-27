@@ -9,6 +9,8 @@
 #include <getopt.h>
 #include <unistd.h>
 #include <libgen.h>
+#include <sys/types.h>
+#include <sys/wait.h>
 
 static void print_usage(const char *prog) {
     (void)prog;
