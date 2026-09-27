@@ -1,7 +1,7 @@
 # 🔥 fdash (fire-dash)
 
 > **The ultra-lightweight terminal process dashboard & manager on top of `systemd`.**  
-> Written in pure C (ANSI C99) with zero external TUI dependencies. Binary size: **< 100 KB**.  
+> Written in pure C (ANSI C99) with zero external TUI dependencies. Binary size: **~115 KB** (stripped).  
 > Primary command: **`fdash`** (alias: `fire-dash`).
 
 ---
@@ -12,9 +12,9 @@
 
 **`fdash` gives you the best of both worlds:**
 1. **Rock-Solid Foundation:** Every process is a true native `systemd` service (`fire-<name>.service`).
-2. **Ultra-Lightweight C Binary:** Consumes virtually **0 MB** RAM at idle and builds into a single self-contained ~90 KB executable.
+2. **Ultra-Lightweight C Binary:** Consumes virtually **0 MB** RAM at idle and builds into a single self-contained ~115 KB executable.
 3. **PM2-like Developer Ergonomics:** Simple commands like `fdash start`, `stop`, `restart`, `delete`, `logs`, `save`.
-4. **Live Split-Pane TUI Dashboard:** Running `fdash` with no arguments opens an interactive terminal UI with live CPU/RAM metrics, process list, and real-time journal log tailing with search.
+4. **Live Split-Pane TUI Dashboard:** Running `fdash` with no arguments opens an interactive terminal UI with live memory metrics, process list, and real-time journal log tailing with search.
 5. **Native Watch Mode via Systemd `.path` Units:** File watch triggers auto-restart natively through systemd without keeping extra Node.js/Python watcher daemons alive in memory!
 6. **Multi-App Config:** Define all your services in a `fire.config.json` (or `ecosystem.config.json`) and start them in one command.
 
@@ -53,13 +53,13 @@ Running `fdash` without arguments (or typing `fdash monit`) opens the split-pane
 - `l`: Cycle log triage filter level: `ALL` ➔ `WARN+ERR` ➔ `ERR ONLY`
 - `/`: Interactive log search with instant keyword highlighting (`Esc` to cancel, `Enter` to commit)
 - `Space`: **Pause / Resume** live auto-scroll (buffers incoming logs in background)
-- `PageUp` / `PageDown` or `u` / `d`: Scroll through logs (10 / 5 lines)
+- `PageUp` / `PageDown` or `u` / `d`: Scroll through logs (10 / 5 lines) when log view is active
 - `Home` or `g`: Jump to oldest log line in buffer
 - `End` or `b` or `G`: Jump to bottom / resume auto-scroll
 - `s`: Start selected application (or all applications if `[ALL APPS]` is selected)
 - `x`: Stop selected application (or all applications if `[ALL APPS]` is selected)
 - `r`: Restart selected application (or all applications if `[ALL APPS]` is selected)
-- `d`: Delete service unit and unregister from systemd
+- `d`: Delete service unit and unregister from systemd (when process table is focused)
 - `Esc`: Unselect log line, close Inspector, exit fullscreen, or clear search filter
 - `q` or `Ctrl+C`: Exit dashboard
 
@@ -74,7 +74,7 @@ Running `fdash` without arguments (or typing `fdash monit`) opens the split-pane
 
 ### Quick Build
 ```bash
-git clone https://github.com/the-synomics-project/fire-dash.git
+git clone https://github.com/Milta-Technologies/fire-dash.git
 cd fire-dash
 make
 sudo make install
@@ -171,8 +171,8 @@ Enables all currently registered `fire-*` units with systemd so they boot automa
 ## 📐 Architecture
 
 - **`src/tui.c`**: ANSI escape sequences with raw termios. Double-buffered single-write frame pipeline. Zero dependencies on ncurses.
-- **`src/unit_gen.c`**: Generates standard INI `fire-<name>.service` and `fire-<name>.path` units in `~/.config/systemd/user/` or `/etc/systemd/system/`. Injects host `$PATH`, `$HOME`, and `$USER`.
-- **`src/dbus_systemd.c`**: Direct D-Bus (`sd-bus`) communication with fallback CLI wrapper, querying unit active states, restart counters, and `/proc/<pid>/` memory & CPU metrics.
+- **`src/unit_gen.c`**: Generates standard INI `fire-<name>.service`, `fire-<name>.path`, and restart companion units in `~/.config/systemd/user/` or `/etc/systemd/system/`. Isolates environment variables in `0600` `.env` files and applies process sandboxing for `--system`.
+- **`src/dbus_systemd.c`**: Direct D-Bus (`sd-bus`) communication and safe argument-vector `systemctl` interface (zero shell invocation), querying unit active states, restart counters, and `/proc/<pid>/` memory metrics.
 - **`src/log_viewer.c`**: Ring-buffered journal log streamer with non-blocking pipes, search indexing, and auto-scroll handling.
 - **`src/config.c` & `src/cJSON.c`**: Embedded lightweight JSON parser for config files.
 

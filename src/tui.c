@@ -26,7 +26,7 @@ static void handle_winch(int sig) {
 static void disable_raw_mode(void) {
     if (!g_raw_enabled) return;
     /* Ensure mouse tracking is disabled, show cursor, restore main screen */
-    write(STDOUT_FILENO, "\033[?1000l\033[?1002l\033[?1006l\033[?25h\033[?1049l", 35);
+    WRITE_LIT(STDOUT_FILENO, "\033[?1000l\033[?1002l\033[?1006l\033[?25h\033[?1049l");
     tcsetattr(STDIN_FILENO, TCSAFLUSH, &orig_termios);
     g_raw_enabled = false;
 }
@@ -40,16 +40,16 @@ static void handle_sig_exit(int sig) {
 static void enable_raw_mode(void) {
     tcgetattr(STDIN_FILENO, &orig_termios);
     struct termios raw = orig_termios;
-    raw.c_iflag &= ~(BRKINT | ICRNL | INPCK | ISTRIP | IXON);
-    raw.c_oflag &= ~(OPOST);
-    raw.c_cflag |= (CS8);
-    raw.c_lflag &= ~(ECHO | ICANON | IEXTEN | ISIG);
+    raw.c_iflag &= (tcflag_t)~(BRKINT | ICRNL | INPCK | ISTRIP | IXON);
+    raw.c_oflag &= (tcflag_t)~(OPOST);
+    raw.c_cflag |= (tcflag_t)(CS8);
+    raw.c_lflag &= (tcflag_t)~(ECHO | ICANON | IEXTEN | ISIG);
     raw.c_cc[VMIN] = 0;
     raw.c_cc[VTIME] = 1;
     tcsetattr(STDIN_FILENO, TCSAFLUSH, &raw);
 
     /* Switch to alternate screen, hide cursor, ensure mouse tracking is DISABLED */
-    write(STDOUT_FILENO, "\033[?1049h\033[?25l\033[?1000l\033[?1002l\033[?1006l", 35);
+    WRITE_LIT(STDOUT_FILENO, "\033[?1049h\033[?25l\033[?1000l\033[?1002l\033[?1006l");
     g_raw_enabled = true;
     atexit(disable_raw_mode);
 }
@@ -979,9 +979,13 @@ int tui_run(SystemdScope scope) {
                     state.search_mode = true;
                     state.search_input[0] = '\0';
                 } else if (c == 'u') {
-                    log_viewer_scroll_up(&state.log_viewer, 5);
-                } else if (c == 'd' || c == 'n') {
-                    log_viewer_scroll_down(&state.log_viewer, 5);
+                    if (is_log_mode) {
+                        log_viewer_scroll_up(&state.log_viewer, 5);
+                    }
+                } else if (c == 'n') {
+                    if (is_log_mode) {
+                        log_viewer_scroll_down(&state.log_viewer, 5);
+                    }
                 } else if (c == 'b' || c == 'G') {
                     state.selected_log_idx = -1;
                     log_viewer_scroll_to_bottom(&state.log_viewer);
@@ -1034,7 +1038,9 @@ int tui_run(SystemdScope scope) {
                         set_status(&state, "⟳ Restarted '%s'", name);
                     }
                 } else if (c == 'd') {
-                    if (state.selected_idx > 0 && state.selected_idx <= app_count) {
+                    if (is_log_mode) {
+                        log_viewer_scroll_down(&state.log_viewer, 5);
+                    } else if (state.selected_idx > 0 && state.selected_idx <= app_count) {
                         const char *name = apps[state.selected_idx - 1].name;
                         systemd_stop_unit(name, scope);
                         systemd_disable_unit(name, scope);

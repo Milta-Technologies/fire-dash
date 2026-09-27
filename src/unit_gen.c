@@ -36,7 +36,7 @@ static int make_dir_p(const char *dir, mode_t mode) {
     return 0;
 }
 
-static bool is_valid_name(const char *name) {
+bool is_valid_name(const char *name) {
     if (!name || !*name) return false;
     for (const char *p = name; *p; p++) {
         if (!isalnum((unsigned char)*p) && *p != '-' && *p != '_' && *p != '.') {
@@ -72,6 +72,7 @@ int unit_gen_get_dir(SystemdScope scope, char *out_path, size_t max_len) {
 int unit_gen_create_service(const AppService *app, char *err_buf, size_t err_len) {
     char dir[MAX_PATH_LEN];
     char file_path[MAX_PATH_LEN];
+    char env_file_path[MAX_PATH_LEN];
     FILE *fp;
 
     if (!app || !is_valid_name(app->name)) {
@@ -82,6 +83,21 @@ int unit_gen_create_service(const AppService *app, char *err_buf, size_t err_len
     if (unit_gen_get_dir(app->scope, dir, sizeof(dir)) != 0) {
         if (err_buf) snprintf(err_buf, err_len, "Failed to resolve systemd unit directory");
         return -1;
+    }
+
+    /* If app has environment variables, isolate them to a 0600 file */
+    if (app->env_count > 0) {
+        snprintf(env_file_path, sizeof(env_file_path), "%s/%s%s.env", dir, FIRE_UNIT_PREFIX, app->name);
+        FILE *efp = fopen(env_file_path, "w");
+        if (!efp) {
+            if (err_buf) snprintf(err_buf, err_len, "Cannot open env file '%s': %s", env_file_path, strerror(errno));
+            return -1;
+        }
+        for (int i = 0; i < app->env_count; i++) {
+            fprintf(efp, "%s=%s\n", app->envs[i].key, app->envs[i].value);
+        }
+        fclose(efp);
+        chmod(env_file_path, 0600);
     }
 
     snprintf(file_path, sizeof(file_path), "%s/%s%s.service", dir, FIRE_UNIT_PREFIX, app->name);
@@ -99,6 +115,34 @@ int unit_gen_create_service(const AppService *app, char *err_buf, size_t err_len
 
     fprintf(fp, "[Service]\n");
     fprintf(fp, "Type=simple\n");
+
+    if (app->scope == SCOPE_SYSTEM) {
+        /* Determine user for system service */
+        const char *svc_user = NULL;
+        if (app->user[0]) {
+            svc_user = app->user;
+        } else {
+            const char *sudo_user = getenv("SUDO_USER");
+            if (sudo_user && *sudo_user && strcmp(sudo_user, "root") != 0) {
+                svc_user = sudo_user;
+            } else {
+                const char *cur_user = getenv("USER");
+                if (cur_user && *cur_user && strcmp(cur_user, "root") != 0) {
+                    svc_user = cur_user;
+                }
+            }
+        }
+        if (svc_user) {
+            fprintf(fp, "User=%s\n", svc_user);
+        }
+
+        /* Basic systemd security sandboxing for system units */
+        fprintf(fp, "NoNewPrivileges=yes\n");
+        fprintf(fp, "ProtectSystem=full\n");
+        fprintf(fp, "ProtectHome=read-only\n");
+        fprintf(fp, "PrivateTmp=yes\n");
+    }
+
     if (app->cwd[0]) {
         fprintf(fp, "WorkingDirectory=%s\n", app->cwd);
     }
@@ -111,43 +155,75 @@ int unit_gen_create_service(const AppService *app, char *err_buf, size_t err_len
     fprintf(fp, "MemoryAccounting=yes\n");
     fprintf(fp, "TasksAccounting=yes\n");
 
-    bool has_path_env = false;
-    bool has_home_env = false;
-    for (int i = 0; i < app->env_count; i++) {
-        if (strcmp(app->envs[i].key, "PATH") == 0) {
-            has_path_env = true;
-        }
-        if (strcmp(app->envs[i].key, "HOME") == 0) {
-            has_home_env = true;
-        }
-        fprintf(fp, "Environment=\"%s=%s\"\n", app->envs[i].key, app->envs[i].value);
+    /* Reference isolated environment file if present */
+    if (app->env_count > 0) {
+        fprintf(fp, "EnvironmentFile=%s\n", env_file_path);
     }
 
-    if (!has_path_env) {
+    if (app->scope == SCOPE_SYSTEM) {
+        /* Clean standard PATH for system units */
+        fprintf(fp, "Environment=\"PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin\"\n");
+    } else {
         const char *cur_path = getenv("PATH");
-        char full_path[4096];
         if (cur_path && *cur_path) {
-            snprintf(full_path, sizeof(full_path), "%s:/usr/local/bin:/usr/bin:/bin:/usr/local/sbin:/usr/sbin", cur_path);
+            fprintf(fp, "Environment=\"PATH=%s:/usr/local/bin:/usr/bin:/bin:/usr/local/sbin:/usr/sbin\"\n", cur_path);
         } else {
-            snprintf(full_path, sizeof(full_path), "/usr/local/bin:/usr/bin:/bin:/usr/local/sbin:/usr/sbin");
+            fprintf(fp, "Environment=\"PATH=/usr/local/bin:/usr/bin:/bin:/usr/local/sbin:/usr/sbin\"\n");
         }
-        fprintf(fp, "Environment=\"PATH=%s\"\n", full_path);
-    }
-
-    if (!has_home_env) {
         const char *home = getenv("HOME");
         if (home && *home) {
             fprintf(fp, "Environment=\"HOME=%s\"\n", home);
         }
-    }
-
-    const char *user = getenv("USER");
-    if (user && *user) {
-        fprintf(fp, "Environment=\"USER=%s\"\n", user);
+        const char *user = getenv("USER");
+        if (user && *user) {
+            fprintf(fp, "Environment=\"USER=%s\"\n", user);
+        }
     }
 
     fprintf(fp, "\n[Install]\n");
-    fprintf(fp, "WantedBy=default.target\n");
+    if (app->scope == SCOPE_SYSTEM) {
+        fprintf(fp, "WantedBy=multi-user.target\n");
+    } else {
+        fprintf(fp, "WantedBy=default.target\n");
+    }
+
+    fclose(fp);
+    chmod(file_path, 0644);
+    return 0;
+}
+
+int unit_gen_create_restart_service(const AppService *app, char *err_buf, size_t err_len) {
+    char dir[MAX_PATH_LEN];
+    char file_path[MAX_PATH_LEN];
+    FILE *fp;
+
+    if (!app || !is_valid_name(app->name)) {
+        if (err_buf) snprintf(err_buf, err_len, "Invalid app name: '%s'", app ? app->name : "NULL");
+        return -1;
+    }
+
+    if (unit_gen_get_dir(app->scope, dir, sizeof(dir)) != 0) {
+        if (err_buf) snprintf(err_buf, err_len, "Failed to resolve systemd unit directory");
+        return -1;
+    }
+
+    snprintf(file_path, sizeof(file_path), "%s/%s%s-restart.service", dir, FIRE_UNIT_PREFIX, app->name);
+
+    fp = fopen(file_path, "w");
+    if (!fp) {
+        if (err_buf) snprintf(err_buf, err_len, "Cannot open '%s' for writing: %s", file_path, strerror(errno));
+        return -1;
+    }
+
+    fprintf(fp, "# Generated by fire-dash v%s (watch restart helper)\n", FIRE_VERSION);
+    fprintf(fp, "[Unit]\n");
+    fprintf(fp, "Description=Restart fire-dash service: %s on change\n\n", app->name);
+
+    fprintf(fp, "[Service]\n");
+    fprintf(fp, "Type=oneshot\n");
+    fprintf(fp, "ExecStart=/bin/systemctl %s restart %s%s.service\n",
+            app->scope == SCOPE_USER ? "--user" : "",
+            FIRE_UNIT_PREFIX, app->name);
 
     fclose(fp);
     chmod(file_path, 0644);
@@ -171,6 +247,11 @@ int unit_gen_create_path(const AppService *app, char *err_buf, size_t err_len) {
         return -1;
     }
 
+    /* Also create the companion restart service */
+    if (unit_gen_create_restart_service(app, err_buf, err_len) != 0) {
+        return -1;
+    }
+
     snprintf(file_path, sizeof(file_path), "%s/%s%s.path", dir, FIRE_UNIT_PREFIX, app->name);
 
     fp = fopen(file_path, "w");
@@ -185,10 +266,14 @@ int unit_gen_create_path(const AppService *app, char *err_buf, size_t err_len) {
 
     fprintf(fp, "[Path]\n");
     fprintf(fp, "PathModified=%s\n", app->watch);
-    fprintf(fp, "Unit=%s%s.service\n\n", FIRE_UNIT_PREFIX, app->name);
+    fprintf(fp, "Unit=%s%s-restart.service\n\n", FIRE_UNIT_PREFIX, app->name);
 
     fprintf(fp, "[Install]\n");
-    fprintf(fp, "WantedBy=default.target\n");
+    if (app->scope == SCOPE_SYSTEM) {
+        fprintf(fp, "WantedBy=multi-user.target\n");
+    } else {
+        fprintf(fp, "WantedBy=default.target\n");
+    }
 
     fclose(fp);
     chmod(file_path, 0644);
@@ -199,6 +284,8 @@ int unit_gen_delete(const char *name, SystemdScope scope, char *err_buf, size_t 
     char dir[MAX_PATH_LEN];
     char service_path[MAX_PATH_LEN];
     char path_path[MAX_PATH_LEN];
+    char restart_path[MAX_PATH_LEN];
+    char env_path[MAX_PATH_LEN];
 
     if (!name || !is_valid_name(name)) {
         if (err_buf) snprintf(err_buf, err_len, "Invalid name: '%s'", name ? name : "NULL");
@@ -212,9 +299,13 @@ int unit_gen_delete(const char *name, SystemdScope scope, char *err_buf, size_t 
 
     snprintf(service_path, sizeof(service_path), "%s/%s%s.service", dir, FIRE_UNIT_PREFIX, name);
     snprintf(path_path, sizeof(path_path), "%s/%s%s.path", dir, FIRE_UNIT_PREFIX, name);
+    snprintf(restart_path, sizeof(restart_path), "%s/%s%s-restart.service", dir, FIRE_UNIT_PREFIX, name);
+    snprintf(env_path, sizeof(env_path), "%s/%s%s.env", dir, FIRE_UNIT_PREFIX, name);
 
     unlink(service_path);
     unlink(path_path);
+    unlink(restart_path);
+    unlink(env_path);
     return 0;
 }
 
@@ -252,7 +343,7 @@ int unit_gen_list_names(SystemdScope scope, char ***out_names, int *out_count) {
             memcpy(name_buf, entry->d_name + prefix_len, name_len);
             name_buf[name_len] = '\0';
 
-            char **new_names = realloc(names, sizeof(char *) * (count + 1));
+            char **new_names = realloc(names, sizeof(char *) * (size_t)(count + 1));
             if (!new_names) {
                 closedir(dir);
                 unit_gen_free_names(names, count);

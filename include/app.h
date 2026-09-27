@@ -16,6 +16,10 @@
 #define MAX_CMD_LEN 2048
 #define MAX_ENV_VARS 128
 
+#define WRITE_LIT(fd, lit) write((fd), (lit), sizeof(lit) - 1)
+
+bool is_valid_name(const char *name);
+
 typedef enum {
     SCOPE_USER = 0,
     SCOPE_SYSTEM = 1
@@ -30,6 +34,7 @@ typedef struct {
     char name[MAX_NAME_LEN];
     char script[MAX_CMD_LEN];
     char cwd[MAX_PATH_LEN];
+    char user[64];
     EnvVar envs[MAX_ENV_VARS];
     int env_count;
     char watch[MAX_PATH_LEN];

@@ -33,46 +33,83 @@ static sd_bus *get_bus(SystemdScope scope) {
 }
 #endif
 
-/* Helper: run a command synchronously and capture exit status */
-static int exec_cmd_silent(const char *cmd) {
-    int ret = system(cmd);
-    if (ret == -1) return -1;
-    if (WIFEXITED(ret)) return WEXITSTATUS(ret);
+#include <fcntl.h>
+
+/* Helper: run a command synchronously via fork+execvp and capture exit status (no shell) */
+static int exec_argv_silent(char *const argv[]) {
+    pid_t pid = fork();
+    if (pid < 0) return -1;
+    if (pid == 0) {
+        int devnull = open("/dev/null", O_WRONLY);
+        if (devnull >= 0) {
+            dup2(devnull, STDOUT_FILENO);
+            dup2(devnull, STDERR_FILENO);
+            close(devnull);
+        }
+        execvp(argv[0], argv);
+        _exit(127);
+    }
+    int status = 0;
+    if (waitpid(pid, &status, 0) < 0) return -1;
+    if (WIFEXITED(status)) return WEXITSTATUS(status);
     return -1;
 }
 
-/* Helper: run command and read output lines */
-static char *exec_cmd_output(const char *cmd) {
-    FILE *fp = popen(cmd, "r");
-    if (!fp) return NULL;
+/* Helper: run command via fork+execvp and read output lines (no shell) */
+static char *exec_argv_output(char *const argv[]) {
+    int fds[2];
+    if (pipe(fds) < 0) return NULL;
 
+    pid_t pid = fork();
+    if (pid < 0) {
+        close(fds[0]);
+        close(fds[1]);
+        return NULL;
+    }
+    if (pid == 0) {
+        close(fds[0]);
+        dup2(fds[1], STDOUT_FILENO);
+        int devnull = open("/dev/null", O_WRONLY);
+        if (devnull >= 0) {
+            dup2(devnull, STDERR_FILENO);
+            close(devnull);
+        }
+        close(fds[1]);
+        execvp(argv[0], argv);
+        _exit(127);
+    }
+
+    close(fds[1]);
     size_t cap = 4096;
     size_t len = 0;
     char *buf = malloc(cap);
     if (!buf) {
-        pclose(fp);
+        close(fds[0]);
+        waitpid(pid, NULL, 0);
         return NULL;
     }
+    buf[0] = '\0';
 
     char chunk[512];
-    while (fgets(chunk, sizeof(chunk), fp)) {
-        size_t clen = strlen(chunk);
-        if (len + clen + 1 >= cap) {
-            cap *= 2;
+    ssize_t n;
+    while ((n = read(fds[0], chunk, sizeof(chunk))) > 0) {
+        if (len + (size_t)n + 1 >= cap) {
+            cap = (cap * 2) + (size_t)n;
             char *new_buf = realloc(buf, cap);
             if (!new_buf) {
                 free(buf);
-                pclose(fp);
+                close(fds[0]);
+                waitpid(pid, NULL, 0);
                 return NULL;
             }
             buf = new_buf;
         }
-        memcpy(buf + len, chunk, clen);
-        len += clen;
+        memcpy(buf + len, chunk, (size_t)n);
+        len += (size_t)n;
         buf[len] = '\0';
     }
-
-    pclose(fp);
+    close(fds[0]);
+    waitpid(pid, NULL, 0);
     return buf;
 }
 
@@ -116,13 +153,18 @@ int systemd_daemon_reload(SystemdScope scope) {
         if (r >= 0) return 0;
     }
 #endif
-    char cmd[256];
-    snprintf(cmd, sizeof(cmd), "systemctl %s daemon-reload >/dev/null 2>&1",
-             scope == SCOPE_USER ? "--user" : "");
-    return exec_cmd_silent(cmd);
+    if (scope == SCOPE_USER) {
+        char *argv[] = {"systemctl", "--user", "daemon-reload", NULL};
+        return exec_argv_silent(argv);
+    } else {
+        char *argv[] = {"systemctl", "daemon-reload", NULL};
+        return exec_argv_silent(argv);
+    }
 }
 
 int systemd_start_unit(const char *name, SystemdScope scope) {
+    if (!name || !is_valid_name(name)) return -1;
+
     char unit_svc[128];
     char unit_path[128];
     snprintf(unit_svc, sizeof(unit_svc), "%s%s.service", FIRE_UNIT_PREFIX, name);
@@ -166,18 +208,29 @@ int systemd_start_unit(const char *name, SystemdScope scope) {
         if (r >= 0) return 0;
     }
 #endif
-    char cmd[512];
-    if (unit_gen_has_watch(name, scope, NULL, 0)) {
-        snprintf(cmd, sizeof(cmd), "systemctl %s start %s %s >/dev/null 2>&1",
-                 scope == SCOPE_USER ? "--user" : "", unit_svc, unit_path);
+    bool has_watch = unit_gen_has_watch(name, scope, NULL, 0);
+    if (scope == SCOPE_USER) {
+        if (has_watch) {
+            char *argv[] = {"systemctl", "--user", "start", unit_svc, unit_path, NULL};
+            return exec_argv_silent(argv);
+        } else {
+            char *argv[] = {"systemctl", "--user", "start", unit_svc, NULL};
+            return exec_argv_silent(argv);
+        }
     } else {
-        snprintf(cmd, sizeof(cmd), "systemctl %s start %s >/dev/null 2>&1",
-                 scope == SCOPE_USER ? "--user" : "", unit_svc);
+        if (has_watch) {
+            char *argv[] = {"systemctl", "start", unit_svc, unit_path, NULL};
+            return exec_argv_silent(argv);
+        } else {
+            char *argv[] = {"systemctl", "start", unit_svc, NULL};
+            return exec_argv_silent(argv);
+        }
     }
-    return exec_cmd_silent(cmd);
 }
 
 int systemd_stop_unit(const char *name, SystemdScope scope) {
+    if (!name || !is_valid_name(name)) return -1;
+
     char unit_svc[128];
     char unit_path[128];
     snprintf(unit_svc, sizeof(unit_svc), "%s%s.service", FIRE_UNIT_PREFIX, name);
@@ -221,13 +274,18 @@ int systemd_stop_unit(const char *name, SystemdScope scope) {
         if (r >= 0) return 0;
     }
 #endif
-    char cmd[512];
-    snprintf(cmd, sizeof(cmd), "systemctl %s stop %s %s >/dev/null 2>&1",
-             scope == SCOPE_USER ? "--user" : "", unit_svc, unit_path);
-    return exec_cmd_silent(cmd);
+    if (scope == SCOPE_USER) {
+        char *argv[] = {"systemctl", "--user", "stop", unit_svc, unit_path, NULL};
+        return exec_argv_silent(argv);
+    } else {
+        char *argv[] = {"systemctl", "stop", unit_svc, unit_path, NULL};
+        return exec_argv_silent(argv);
+    }
 }
 
 int systemd_restart_unit(const char *name, SystemdScope scope) {
+    if (!name || !is_valid_name(name)) return -1;
+
     char unit_svc[128];
     snprintf(unit_svc, sizeof(unit_svc), "%s%s.service", FIRE_UNIT_PREFIX, name);
 
@@ -251,49 +309,73 @@ int systemd_restart_unit(const char *name, SystemdScope scope) {
         if (r >= 0) return 0;
     }
 #endif
-    char cmd[512];
-    snprintf(cmd, sizeof(cmd), "systemctl %s restart %s >/dev/null 2>&1",
-             scope == SCOPE_USER ? "--user" : "", unit_svc);
-    return exec_cmd_silent(cmd);
+    if (scope == SCOPE_USER) {
+        char *argv[] = {"systemctl", "--user", "restart", unit_svc, NULL};
+        return exec_argv_silent(argv);
+    } else {
+        char *argv[] = {"systemctl", "restart", unit_svc, NULL};
+        return exec_argv_silent(argv);
+    }
 }
 
 int systemd_enable_unit(const char *name, SystemdScope scope) {
+    if (!name || !is_valid_name(name)) return -1;
+
     char unit_svc[128];
     char unit_path[128];
     snprintf(unit_svc, sizeof(unit_svc), "%s%s.service", FIRE_UNIT_PREFIX, name);
     snprintf(unit_path, sizeof(unit_path), "%s%s.path", FIRE_UNIT_PREFIX, name);
 
-    char cmd[512];
-    if (unit_gen_has_watch(name, scope, NULL, 0)) {
-        snprintf(cmd, sizeof(cmd), "systemctl %s enable %s %s >/dev/null 2>&1",
-                 scope == SCOPE_USER ? "--user" : "", unit_svc, unit_path);
+    bool has_watch = unit_gen_has_watch(name, scope, NULL, 0);
+    if (scope == SCOPE_USER) {
+        if (has_watch) {
+            char *argv[] = {"systemctl", "--user", "enable", unit_svc, unit_path, NULL};
+            return exec_argv_silent(argv);
+        } else {
+            char *argv[] = {"systemctl", "--user", "enable", unit_svc, NULL};
+            return exec_argv_silent(argv);
+        }
     } else {
-        snprintf(cmd, sizeof(cmd), "systemctl %s enable %s >/dev/null 2>&1",
-                 scope == SCOPE_USER ? "--user" : "", unit_svc);
+        if (has_watch) {
+            char *argv[] = {"systemctl", "enable", unit_svc, unit_path, NULL};
+            return exec_argv_silent(argv);
+        } else {
+            char *argv[] = {"systemctl", "enable", unit_svc, NULL};
+            return exec_argv_silent(argv);
+        }
     }
-    return exec_cmd_silent(cmd);
 }
 
 int systemd_disable_unit(const char *name, SystemdScope scope) {
+    if (!name || !is_valid_name(name)) return -1;
+
     char unit_svc[128];
     char unit_path[128];
     snprintf(unit_svc, sizeof(unit_svc), "%s%s.service", FIRE_UNIT_PREFIX, name);
     snprintf(unit_path, sizeof(unit_path), "%s%s.path", FIRE_UNIT_PREFIX, name);
 
-    char cmd[512];
-    snprintf(cmd, sizeof(cmd), "systemctl %s disable %s %s >/dev/null 2>&1",
-             scope == SCOPE_USER ? "--user" : "", unit_svc, unit_path);
-    return exec_cmd_silent(cmd);
+    if (scope == SCOPE_USER) {
+        char *argv[] = {"systemctl", "--user", "disable", unit_svc, unit_path, NULL};
+        return exec_argv_silent(argv);
+    } else {
+        char *argv[] = {"systemctl", "disable", unit_svc, unit_path, NULL};
+        return exec_argv_silent(argv);
+    }
 }
 
 int systemd_reset_failed(const char *name, SystemdScope scope) {
+    if (!name || !is_valid_name(name)) return -1;
+
     char unit_svc[128];
     snprintf(unit_svc, sizeof(unit_svc), "%s%s.service", FIRE_UNIT_PREFIX, name);
 
-    char cmd[512];
-    snprintf(cmd, sizeof(cmd), "systemctl %s reset-failed %s >/dev/null 2>&1",
-             scope == SCOPE_USER ? "--user" : "", unit_svc);
-    return exec_cmd_silent(cmd);
+    if (scope == SCOPE_USER) {
+        char *argv[] = {"systemctl", "--user", "reset-failed", unit_svc, NULL};
+        return exec_argv_silent(argv);
+    } else {
+        char *argv[] = {"systemctl", "reset-failed", unit_svc, NULL};
+        return exec_argv_silent(argv);
+    }
 }
 
 /* Reads live process memory & CPU directly from /proc on Linux or libproc on macOS */
@@ -347,12 +429,19 @@ int systemd_get_unit_status(const char *name, SystemdScope scope, ProcessInfo *i
     /* Check watch path */
     info->has_watch = unit_gen_has_watch(name, scope, info->watch_path, sizeof(info->watch_path));
 
-    char cmd[512];
-    snprintf(cmd, sizeof(cmd),
-             "systemctl %s show %s -p ActiveState,SubState,MainPID,NRestarts,CPUUsageNSec,MemoryCurrent,ExecMainStartTimestamp,UnitFileState 2>/dev/null",
-             scope == SCOPE_USER ? "--user" : "", info->unit_name);
+    char *argv_single[16];
+    int s_idx = 0;
+    argv_single[s_idx++] = "systemctl";
+    if (scope == SCOPE_USER) {
+        argv_single[s_idx++] = "--user";
+    }
+    argv_single[s_idx++] = "show";
+    argv_single[s_idx++] = info->unit_name;
+    argv_single[s_idx++] = "-p";
+    argv_single[s_idx++] = "ActiveState,SubState,MainPID,NRestarts,CPUUsageNSec,MemoryCurrent,ExecMainStartTimestamp,UnitFileState";
+    argv_single[s_idx] = NULL;
 
-    char *output = exec_cmd_output(cmd);
+    char *output = exec_argv_output(argv_single);
     if (!output) {
         return -1;
     }
@@ -408,7 +497,7 @@ int systemd_list_all(SystemdScope scope, ProcessInfo **out_list, int *out_count)
         return 0;
     }
 
-    ProcessInfo *list = calloc(count, sizeof(ProcessInfo));
+    ProcessInfo *list = calloc((size_t)count, sizeof(ProcessInfo));
     if (!list) {
         unit_gen_free_names(names, count);
         return -1;
@@ -423,16 +512,25 @@ int systemd_list_all(SystemdScope scope, ProcessInfo **out_list, int *out_count)
         list[i].has_watch = unit_gen_has_watch(names[i], scope, list[i].watch_path, sizeof(list[i].watch_path));
     }
 
-    /* Batch query all units in a single systemctl show call */
-    char cmd[4096];
-    size_t cmd_len = snprintf(cmd, sizeof(cmd), "systemctl %s show ", scope == SCOPE_USER ? "--user" : "");
-    for (int i = 0; i < count && cmd_len + strlen(list[i].unit_name) + 2 < sizeof(cmd) - 150; i++) {
-        cmd_len += snprintf(cmd + cmd_len, sizeof(cmd) - cmd_len, "%s ", list[i].unit_name);
+    /* Batch query all units in a single systemctl show call without shell */
+    char **show_argv = calloc((size_t)count + 8, sizeof(char *));
+    char *output = NULL;
+    if (show_argv) {
+        int a_idx = 0;
+        show_argv[a_idx++] = "systemctl";
+        if (scope == SCOPE_USER) {
+            show_argv[a_idx++] = "--user";
+        }
+        show_argv[a_idx++] = "show";
+        for (int i = 0; i < count; i++) {
+            show_argv[a_idx++] = list[i].unit_name;
+        }
+        show_argv[a_idx++] = "-p";
+        show_argv[a_idx++] = "Id,ActiveState,SubState,MainPID,NRestarts,CPUUsageNSec,MemoryCurrent,UnitFileState";
+        show_argv[a_idx] = NULL;
+        output = exec_argv_output(show_argv);
+        free(show_argv);
     }
-    snprintf(cmd + cmd_len, sizeof(cmd) - cmd_len,
-             "-p Id,ActiveState,SubState,MainPID,NRestarts,CPUUsageNSec,MemoryCurrent,UnitFileState 2>/dev/null");
-
-    char *output = exec_cmd_output(cmd);
     if (output) {
         char *saveptr = NULL;
         char *line = strtok_r(output, "\r\n", &saveptr);

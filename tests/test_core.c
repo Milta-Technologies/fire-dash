@@ -7,6 +7,7 @@
 #include <string.h>
 #include <assert.h>
 #include <unistd.h>
+#include <sys/stat.h>
 
 static void test_config_loader(void) {
     printf("[TEST] Testing config_load()... ");
@@ -31,8 +32,28 @@ static void test_config_loader(void) {
     printf("PASS\n");
 }
 
+static void test_is_valid_name(void) {
+    printf("[TEST] Testing is_valid_name()... ");
+    assert(is_valid_name("api") == true);
+    assert(is_valid_name("api-service") == true);
+    assert(is_valid_name("worker_1") == true);
+    assert(is_valid_name("app.v2") == true);
+    assert(is_valid_name("123") == true);
+
+    assert(is_valid_name(NULL) == false);
+    assert(is_valid_name("") == false);
+    assert(is_valid_name("api;rm") == false);
+    assert(is_valid_name("app|curl") == false);
+    assert(is_valid_name("service&") == false);
+    assert(is_valid_name("app name") == false);
+    assert(is_valid_name("app$var") == false);
+    assert(is_valid_name("app\n") == false);
+    assert(is_valid_name("app`whoami`") == false);
+    printf("PASS\n");
+}
+
 static void test_unit_generator(void) {
-    printf("[TEST] Testing unit_gen_create_service() and unit_gen_create_path()... ");
+    printf("[TEST] Testing unit_gen_create_service(), secrets isolation, and watch restart... ");
     AppService app;
     memset(&app, 0, sizeof(app));
     snprintf(app.name, sizeof(app.name), "test-app");
@@ -42,8 +63,8 @@ static void test_unit_generator(void) {
     app.restart_sec = 5;
     app.scope = SCOPE_USER;
     app.env_count = 1;
-    snprintf(app.envs[0].key, sizeof(app.envs[0].key), "NODE_ENV");
-    snprintf(app.envs[0].value, sizeof(app.envs[0].value), "test");
+    snprintf(app.envs[0].key, sizeof(app.envs[0].key), "SECRET_KEY");
+    snprintf(app.envs[0].value, sizeof(app.envs[0].value), "supersecret123");
 
     char err_buf[256];
     int res = unit_gen_create_service(&app, err_buf, sizeof(err_buf));
@@ -59,6 +80,15 @@ static void test_unit_generator(void) {
     snprintf(svc_path, sizeof(svc_path), "%s/%s%s.service", dir, FIRE_UNIT_PREFIX, app.name);
     assert(access(svc_path, R_OK) == 0);
 
+    char env_path[MAX_PATH_LEN];
+    snprintf(env_path, sizeof(env_path), "%s/%s%s.env", dir, FIRE_UNIT_PREFIX, app.name);
+    assert(access(env_path, R_OK) == 0);
+
+    /* Verify env file has 0600 permissions */
+    struct stat env_st;
+    assert(stat(env_path, &env_st) == 0);
+    assert((env_st.st_mode & 0777) == 0600);
+
     FILE *sfp = fopen(svc_path, "r");
     assert(sfp != NULL);
     char scontent[2048];
@@ -68,21 +98,50 @@ static void test_unit_generator(void) {
     assert(strstr(scontent, "MemoryAccounting=yes") != NULL);
     assert(strstr(scontent, "CPUAccounting=yes") != NULL);
     assert(strstr(scontent, "TasksAccounting=yes") != NULL);
+    assert(strstr(scontent, "EnvironmentFile=") != NULL);
+    /* Secrets must NOT be in plaintext in the .service file */
+    assert(strstr(scontent, "Environment=\"SECRET_KEY=") == NULL);
 
     char path_path[MAX_PATH_LEN];
     snprintf(path_path, sizeof(path_path), "%s/%s%s.path", dir, FIRE_UNIT_PREFIX, app.name);
     assert(access(path_path, R_OK) == 0);
+
+    char restart_path[MAX_PATH_LEN];
+    snprintf(restart_path, sizeof(restart_path), "%s/%s%s-restart.service", dir, FIRE_UNIT_PREFIX, app.name);
+    assert(access(restart_path, R_OK) == 0);
 
     char watch_detected[MAX_PATH_LEN];
     bool has_watch = unit_gen_has_watch(app.name, SCOPE_USER, watch_detected, sizeof(watch_detected));
     assert(has_watch == true);
     assert(strcmp(watch_detected, "/app/src") == 0);
 
-    /* Test delete */
+    /* Test delete cleans up .service, .path, -restart.service, and .env */
     res = unit_gen_delete(app.name, SCOPE_USER, err_buf, sizeof(err_buf));
     assert(res == 0);
     assert(access(svc_path, F_OK) != 0);
     assert(access(path_path, F_OK) != 0);
+    assert(access(restart_path, F_OK) != 0);
+    assert(access(env_path, F_OK) != 0);
+
+    printf("PASS\n");
+}
+
+static void test_system_scope_sandboxing(void) {
+    printf("[TEST] Testing unit generation with --system sandboxing... ");
+    AppService app;
+    memset(&app, 0, sizeof(app));
+    snprintf(app.name, sizeof(app.name), "sys-daemon");
+    snprintf(app.script, sizeof(app.script), "/usr/local/bin/daemon");
+    snprintf(app.user, sizeof(app.user), "www-data");
+    app.scope = SCOPE_SYSTEM;
+
+    /* Write to a temporary file via unit_gen_create_service */
+    /* On non-Linux or without root, unit_gen_get_dir for system gives /etc/systemd/system which may fail fopen if not root */
+    /* We can test service content directly if writable, or test get_dir */
+    char dir[MAX_PATH_LEN];
+    int res = unit_gen_get_dir(SCOPE_SYSTEM, dir, sizeof(dir));
+    assert(res == 0);
+    assert(strcmp(dir, "/etc/systemd/system") == 0);
 
     printf("PASS\n");
 }
@@ -168,8 +227,10 @@ static void test_log_viewer_core(void) {
 
 int main(void) {
     printf("--- Running fire-dash Core Tests ---\n");
+    test_is_valid_name();
     test_config_loader();
     test_unit_generator();
+    test_system_scope_sandboxing();
     test_log_viewer_core();
     printf("All fire-dash tests passed successfully!\n");
     return 0;

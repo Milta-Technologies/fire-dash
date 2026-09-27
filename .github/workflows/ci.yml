@@ -1,0 +1,62 @@
+name: CI
+
+on:
+  push:
+    branches: [ main, master ]
+  pull_request:
+    branches: [ main, master ]
+
+jobs:
+  build-and-test:
+    name: Build & Test (${{ matrix.compiler }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        compiler: [ gcc, clang ]
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libsystemd-dev
+
+      - name: Build with ${{ matrix.compiler }}
+        run: |
+          CC=${{ matrix.compiler }} make clean
+          CC=${{ matrix.compiler }} make
+
+      - name: Run test suite
+        run: |
+          CC=${{ matrix.compiler }} make test
+
+      - name: Test CLI smoke tests
+        run: |
+          ./bin/fdash --help
+          ./bin/fdash list
+
+  sanitizers:
+    name: AddressSanitizer & UBSan
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libsystemd-dev
+
+      - name: Build and test under ASan/UBSan
+        run: |
+          make clean
+          CFLAGS="-Wall -Wextra -pedantic -std=c99 -D_GNU_SOURCE -Iinclude -fsanitize=address,undefined -g" LDFLAGS="-fsanitize=address,undefined" make test
+          CFLAGS="-Wall -Wextra -pedantic -std=c99 -D_GNU_SOURCE -Iinclude -fsanitize=address,undefined -g" LDFLAGS="-fsanitize=address,undefined" make
+
+      - name: Test CLI argument buffer handling under ASan
+        run: |
+          python3 -c 'import subprocess; res = subprocess.run(["./bin/fdash", "list"] + [f"arg{i}" for i in range(100)], capture_output=True, text=True); print(res.stdout); exit(res.returncode)'

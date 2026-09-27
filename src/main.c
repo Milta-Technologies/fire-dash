@@ -134,17 +134,31 @@ static int start_single_app(const AppService *app, SystemdScope scope) {
     if (systemd_start_unit(app->name, scope) == 0) {
         printf("\033[32;1mSUCCESS\033[0m\n");
     } else {
-        printf("\033[33;1mTRIGGERED\033[0m\n");
+        printf("\033[31;1mFAILED\033[0m\n");
+        return -1;
     }
     return 0;
+}
+
+static void escape_bash_string(const char *src, char *dst, size_t dst_size) {
+    size_t j = 0;
+    for (size_t i = 0; src[i] && j + 2 < dst_size; i++) {
+        if (src[i] == '"' || src[i] == '\\' || src[i] == '$' || src[i] == '`') {
+            dst[j++] = '\\';
+        }
+        dst[j++] = src[i];
+    }
+    dst[j] = '\0';
 }
 
 static int cmd_start(int argc, char **argv, SystemdScope scope) {
     char name[MAX_NAME_LEN] = "";
     char watch[MAX_PATH_LEN] = "";
     char cwd[MAX_PATH_LEN] = "";
+    char run_user[64] = "";
     int restart_sec = 2;
     char target[MAX_PATH_LEN] = "";
+    bool auto_yes = false;
 
     /* Parse start specific options */
     for (int i = 0; i < argc; i++) {
@@ -159,8 +173,12 @@ static int cmd_start(int argc, char **argv, SystemdScope scope) {
             }
         } else if (strcmp(argv[i], "--cwd") == 0 || strcmp(argv[i], "-c") == 0) {
             if (i + 1 < argc) strncpy(cwd, argv[++i], sizeof(cwd) - 1);
+        } else if (strcmp(argv[i], "--run-as") == 0 || strcmp(argv[i], "--user-name") == 0) {
+            if (i + 1 < argc) strncpy(run_user, argv[++i], sizeof(run_user) - 1);
         } else if (strcmp(argv[i], "--restart-sec") == 0) {
             if (i + 1 < argc) restart_sec = atoi(argv[++i]);
+        } else if (strcmp(argv[i], "-y") == 0 || strcmp(argv[i], "--yes") == 0) {
+            auto_yes = true;
         } else if (argv[i][0] != '-' && target[0] == '\0') {
             strncpy(target, argv[i], sizeof(target) - 1);
         }
@@ -168,6 +186,7 @@ static int cmd_start(int argc, char **argv, SystemdScope scope) {
 
     /* Check if target is a JSON config file or config exists */
     bool is_config = false;
+    bool auto_detected_config = false;
     if (target[0] && strstr(target, ".json") != NULL) {
         is_config = true;
     } else if (target[0] == '\0') {
@@ -175,10 +194,22 @@ static int cmd_start(int argc, char **argv, SystemdScope scope) {
         if (config_find_default(found_config, sizeof(found_config)) == 0) {
             strncpy(target, found_config, sizeof(target) - 1);
             is_config = true;
+            auto_detected_config = true;
         }
     }
 
     if (is_config) {
+        if (auto_detected_config && !auto_yes && isatty(STDIN_FILENO)) {
+            printf("\033[38;5;208;1m🔥 fdash\033[0m: Found configuration file '\033[1m%s\033[0m' in current directory.\n", target);
+            printf("Register and start all configured services? [y/N]: ");
+            fflush(stdout);
+            char answer[16] = {0};
+            if (!fgets(answer, sizeof(answer), stdin) || (answer[0] != 'y' && answer[0] != 'Y')) {
+                printf("Aborted.\n");
+                return 0;
+            }
+        }
+
         printf("\033[38;5;208;1m🔥 fdash\033[0m: Loading configuration from '\033[1m%s\033[0m'...\n", target);
         AppService *apps = NULL;
         int count = 0;
@@ -190,6 +221,14 @@ static int cmd_start(int argc, char **argv, SystemdScope scope) {
 
         printf("Found %d application%s defined in config.\n\n", count, count == 1 ? "" : "s");
         for (int i = 0; i < count; i++) {
+            if (!is_valid_name(apps[i].name)) {
+                fprintf(stderr, "\033[31;1mError:\033[0m Invalid app name '%s' in config\n", apps[i].name);
+                config_free(apps, count);
+                return 1;
+            }
+            if (run_user[0]) {
+                strncpy(apps[i].user, run_user, sizeof(apps[i].user) - 1);
+            }
             start_single_app(&apps[i], apps[i].scope);
             printf("\n");
         }
@@ -209,10 +248,15 @@ static int cmd_start(int argc, char **argv, SystemdScope scope) {
     memset(&app, 0, sizeof(app));
     app.scope = scope;
     app.restart_sec = restart_sec;
+    if (run_user[0]) {
+        strncpy(app.user, run_user, sizeof(app.user) - 1);
+    }
 
-    /* Script command */
+    /* Script command with escaped quotes for bash -lc */
     if (target[0] != '/') {
-        snprintf(app.script, sizeof(app.script), "/bin/bash -lc \"%s\"", target);
+        char escaped[MAX_CMD_LEN];
+        escape_bash_string(target, escaped, sizeof(escaped));
+        snprintf(app.script, sizeof(app.script), "/bin/bash -lc \"%s\"", escaped);
     } else {
         snprintf(app.script, sizeof(app.script), "%s", target);
     }
@@ -228,6 +272,11 @@ static int cmd_start(int argc, char **argv, SystemdScope scope) {
         char *dot = strrchr(bname, '.');
         if (dot && dot != bname) *dot = '\0';
         snprintf(app.name, sizeof(app.name), "%s", bname);
+    }
+
+    if (!is_valid_name(app.name)) {
+        fprintf(stderr, "\033[31;1mError:\033[0m Invalid app name: '%s'. Name must contain only alphanumeric characters, dashes, dots, or underscores.\n", app.name);
+        return 1;
     }
 
     /* CWD */
@@ -261,22 +310,35 @@ static int cmd_stop(const char *target, SystemdScope scope) {
         return 1;
     }
 
+    int status = 0;
     if (strcmp(target, "all") == 0) {
         char **names = NULL;
         int count = 0;
         unit_gen_list_names(scope, &names, &count);
         for (int i = 0; i < count; i++) {
             printf("Stopping '\033[1m%s\033[0m'... ", names[i]);
-            systemd_stop_unit(names[i], scope);
-            printf("\033[32mOK\033[0m\n");
+            if (systemd_stop_unit(names[i], scope) == 0) {
+                printf("\033[32mOK\033[0m\n");
+            } else {
+                printf("\033[31mFAILED\033[0m\n");
+                status = 1;
+            }
         }
         unit_gen_free_names(names, count);
     } else {
+        if (!is_valid_name(target)) {
+            fprintf(stderr, "\033[31;1mError:\033[0m Invalid app name '%s'\n", target);
+            return 1;
+        }
         printf("Stopping '\033[1m%s\033[0m'... ", target);
-        systemd_stop_unit(target, scope);
-        printf("\033[32mOK\033[0m\n");
+        if (systemd_stop_unit(target, scope) == 0) {
+            printf("\033[32mOK\033[0m\n");
+        } else {
+            printf("\033[31mFAILED\033[0m\n");
+            status = 1;
+        }
     }
-    return 0;
+    return status;
 }
 
 static int cmd_restart(const char *target, SystemdScope scope) {
@@ -285,22 +347,35 @@ static int cmd_restart(const char *target, SystemdScope scope) {
         return 1;
     }
 
+    int status = 0;
     if (strcmp(target, "all") == 0) {
         char **names = NULL;
         int count = 0;
         unit_gen_list_names(scope, &names, &count);
         for (int i = 0; i < count; i++) {
             printf("Restarting '\033[1m%s\033[0m'... ", names[i]);
-            systemd_restart_unit(names[i], scope);
-            printf("\033[32mOK\033[0m\n");
+            if (systemd_restart_unit(names[i], scope) == 0) {
+                printf("\033[32mOK\033[0m\n");
+            } else {
+                printf("\033[31mFAILED\033[0m\n");
+                status = 1;
+            }
         }
         unit_gen_free_names(names, count);
     } else {
+        if (!is_valid_name(target)) {
+            fprintf(stderr, "\033[31;1mError:\033[0m Invalid app name '%s'\n", target);
+            return 1;
+        }
         printf("Restarting '\033[1m%s\033[0m'... ", target);
-        systemd_restart_unit(target, scope);
-        printf("\033[32mOK\033[0m\n");
+        if (systemd_restart_unit(target, scope) == 0) {
+            printf("\033[32mOK\033[0m\n");
+        } else {
+            printf("\033[31mFAILED\033[0m\n");
+            status = 1;
+        }
     }
-    return 0;
+    return status;
 }
 
 static int cmd_delete(const char *target, SystemdScope scope) {
@@ -309,6 +384,7 @@ static int cmd_delete(const char *target, SystemdScope scope) {
         return 1;
     }
 
+    int status = 0;
     if (strcmp(target, "all") == 0) {
         char **names = NULL;
         int count = 0;
@@ -317,20 +393,32 @@ static int cmd_delete(const char *target, SystemdScope scope) {
             printf("Deleting '\033[1m%s\033[0m'... ", names[i]);
             systemd_stop_unit(names[i], scope);
             systemd_disable_unit(names[i], scope);
-            unit_gen_delete(names[i], scope, NULL, 0);
-            printf("\033[32mOK\033[0m\n");
+            if (unit_gen_delete(names[i], scope, NULL, 0) == 0) {
+                printf("\033[32mOK\033[0m\n");
+            } else {
+                printf("\033[31mFAILED\033[0m\n");
+                status = 1;
+            }
         }
         unit_gen_free_names(names, count);
         systemd_daemon_reload(scope);
     } else {
+        if (!is_valid_name(target)) {
+            fprintf(stderr, "\033[31;1mError:\033[0m Invalid app name '%s'\n", target);
+            return 1;
+        }
         printf("Deleting '\033[1m%s\033[0m'... ", target);
         systemd_stop_unit(target, scope);
         systemd_disable_unit(target, scope);
-        unit_gen_delete(target, scope, NULL, 0);
+        if (unit_gen_delete(target, scope, NULL, 0) == 0) {
+            printf("\033[32mOK\033[0m\n");
+        } else {
+            printf("\033[31mFAILED\033[0m\n");
+            status = 1;
+        }
         systemd_daemon_reload(scope);
-        printf("\033[32mOK\033[0m\n");
     }
-    return 0;
+    return status;
 }
 
 static int cmd_save(SystemdScope scope) {
@@ -342,15 +430,22 @@ static int cmd_save(SystemdScope scope) {
         return 0;
     }
 
+    int status = 0;
     printf("\033[38;5;208;1m🔥 fdash\033[0m: Enabling %d services to persist on boot...\n", count);
     for (int i = 0; i < count; i++) {
         printf("  Enabling \033[1m%s\033[0m... ", names[i]);
-        systemd_enable_unit(names[i], scope);
-        printf("\033[32mOK\033[0m\n");
+        if (systemd_enable_unit(names[i], scope) == 0) {
+            printf("\033[32mOK\033[0m\n");
+        } else {
+            printf("\033[31mFAILED\033[0m\n");
+            status = 1;
+        }
     }
     unit_gen_free_names(names, count);
-    printf("✔ All fdash services enabled for auto-start.\n");
-    return 0;
+    if (status == 0) {
+        printf("✔ All fdash services enabled for auto-start.\n");
+    }
+    return status;
 }
 
 static int cmd_logs(int argc, char **argv, SystemdScope scope) {
@@ -368,22 +463,48 @@ static int cmd_logs(int argc, char **argv, SystemdScope scope) {
         }
     }
 
-    char cmd[512];
-    if (name[0]) {
-        snprintf(cmd, sizeof(cmd), "journalctl %s -u %s%s.service -n %d %s",
-                 scope == SCOPE_USER ? "--user" : "",
-                 FIRE_UNIT_PREFIX, name,
-                 lines,
-                 follow ? "-f" : "--no-pager");
-    } else {
-        snprintf(cmd, sizeof(cmd), "journalctl %s -u '%s*.service' -n %d %s",
-                 scope == SCOPE_USER ? "--user" : "",
-                 FIRE_UNIT_PREFIX,
-                 lines,
-                 follow ? "-f" : "--no-pager");
+    if (name[0] && !is_valid_name(name)) {
+        fprintf(stderr, "\033[31;1mError:\033[0m Invalid app name '%s'\n", name);
+        return 1;
     }
 
-    return system(cmd);
+    char unit_pattern[128];
+    if (name[0]) {
+        snprintf(unit_pattern, sizeof(unit_pattern), "%s%s.service", FIRE_UNIT_PREFIX, name);
+    } else {
+        snprintf(unit_pattern, sizeof(unit_pattern), "%s*.service", FIRE_UNIT_PREFIX);
+    }
+
+    char lines_buf[32];
+    snprintf(lines_buf, sizeof(lines_buf), "%d", lines);
+
+    char *jargs[16];
+    int idx = 0;
+    jargs[idx++] = "journalctl";
+    if (scope == SCOPE_USER) jargs[idx++] = "--user";
+    jargs[idx++] = "-u";
+    jargs[idx++] = unit_pattern;
+    jargs[idx++] = "-n";
+    jargs[idx++] = lines_buf;
+    if (follow) {
+        jargs[idx++] = "-f";
+    } else {
+        jargs[idx++] = "--no-pager";
+    }
+    jargs[idx] = NULL;
+
+    pid_t pid = fork();
+    if (pid < 0) {
+        perror("fork");
+        return 1;
+    }
+    if (pid == 0) {
+        execvp(jargs[0], jargs);
+        _exit(127);
+    }
+    int wait_status = 0;
+    waitpid(pid, &wait_status, 0);
+    return WIFEXITED(wait_status) ? WEXITSTATUS(wait_status) : 1;
 }
 
 int main(int argc, char **argv) {
@@ -404,8 +525,13 @@ int main(int argc, char **argv) {
         }
     }
 
-    /* Filter out global flags for command dispatch */
-    char *filtered_args[64];
+    /* Dynamically allocate filtered_args to prevent stack buffer overflow */
+    char **filtered_args = calloc((size_t)argc + 1, sizeof(char *));
+    if (!filtered_args) {
+        fprintf(stderr, "Out of memory\n");
+        return 1;
+    }
+
     int filtered_count = 0;
     for (int i = 1; i < argc; i++) {
         if (strcmp(argv[i], "--system") == 0 || strcmp(argv[i], "--user") == 0) {
@@ -416,31 +542,36 @@ int main(int argc, char **argv) {
 
     /* Default with no subcommands: Launch interactive TUI */
     if (filtered_count == 0 || strcmp(filtered_args[0], "monit") == 0) {
+        free(filtered_args);
         return tui_run(scope);
     }
 
     const char *subcmd = filtered_args[0];
+    int res = 0;
 
     if (strcmp(subcmd, "start") == 0) {
-        return cmd_start(filtered_count - 1, &filtered_args[1], scope);
+        res = cmd_start(filtered_count - 1, &filtered_args[1], scope);
     } else if (strcmp(subcmd, "stop") == 0) {
         const char *target = filtered_count > 1 ? filtered_args[1] : NULL;
-        return cmd_stop(target, scope);
+        res = cmd_stop(target, scope);
     } else if (strcmp(subcmd, "restart") == 0) {
         const char *target = filtered_count > 1 ? filtered_args[1] : NULL;
-        return cmd_restart(target, scope);
+        res = cmd_restart(target, scope);
     } else if (strcmp(subcmd, "delete") == 0 || strcmp(subcmd, "del") == 0) {
         const char *target = filtered_count > 1 ? filtered_args[1] : NULL;
-        return cmd_delete(target, scope);
+        res = cmd_delete(target, scope);
     } else if (strcmp(subcmd, "list") == 0 || strcmp(subcmd, "ls") == 0) {
-        return cmd_list(scope);
+        res = cmd_list(scope);
     } else if (strcmp(subcmd, "logs") == 0 || strcmp(subcmd, "log") == 0) {
-        return cmd_logs(filtered_count - 1, &filtered_args[1], scope);
+        res = cmd_logs(filtered_count - 1, &filtered_args[1], scope);
     } else if (strcmp(subcmd, "save") == 0) {
-        return cmd_save(scope);
+        res = cmd_save(scope);
     } else {
         fprintf(stderr, "\033[31;1mUnknown command:\033[0m '%s'\n\n", subcmd);
         print_usage(argv[0]);
-        return 1;
+        res = 1;
     }
+
+    free(filtered_args);
+    return res;
 }

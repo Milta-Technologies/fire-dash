@@ -17,7 +17,7 @@ void log_viewer_init(LogViewer *lv) {
     lv->is_dirty = true;
 }
 
-static FILE *log_stream_open(const char *cmd, pid_t *out_pid) {
+static FILE *log_stream_open_argv(char *const argv[], pid_t *out_pid) {
     int fds[2];
     if (pipe(fds) < 0) return NULL;
 
@@ -32,9 +32,13 @@ static FILE *log_stream_open(const char *cmd, pid_t *out_pid) {
         /* Child process */
         close(fds[0]);
         dup2(fds[1], STDOUT_FILENO);
-        dup2(fds[1], STDERR_FILENO);
+        int devnull = open("/dev/null", O_WRONLY);
+        if (devnull >= 0) {
+            dup2(devnull, STDERR_FILENO);
+            close(devnull);
+        }
         close(fds[1]);
-        execl("/bin/sh", "sh", "-c", cmd, (char *)NULL);
+        execvp(argv[0], argv);
         _exit(127);
     }
 
@@ -46,6 +50,44 @@ static FILE *log_stream_open(const char *cmd, pid_t *out_pid) {
     }
     *out_pid = pid;
     return fdopen(fds[0], "r");
+}
+
+static void log_viewer_load_backlog(LogViewer *lv, char *const argv[]) {
+    int fds[2];
+    if (pipe(fds) < 0) return;
+
+    pid_t pid = fork();
+    if (pid < 0) {
+        close(fds[0]);
+        close(fds[1]);
+        return;
+    }
+
+    if (pid == 0) {
+        close(fds[0]);
+        dup2(fds[1], STDOUT_FILENO);
+        int devnull = open("/dev/null", O_WRONLY);
+        if (devnull >= 0) {
+            dup2(devnull, STDERR_FILENO);
+            close(devnull);
+        }
+        close(fds[1]);
+        execvp(argv[0], argv);
+        _exit(127);
+    }
+
+    close(fds[1]);
+    FILE *fp = fdopen(fds[0], "r");
+    if (fp) {
+        char line[MAX_LOG_LINE_LEN];
+        while (fgets(line, sizeof(line), fp)) {
+            log_viewer_append(lv, line, false);
+        }
+        fclose(fp);
+    } else {
+        close(fds[0]);
+    }
+    waitpid(pid, NULL, 0);
 }
 
 void log_viewer_cleanup(LogViewer *lv) {
@@ -260,26 +302,41 @@ void log_viewer_set_app(LogViewer *lv, const char *app_name, SystemdScope scope)
         snprintf(lv->current_app, sizeof(lv->current_app), "ALL");
         lv->current_scope = scope;
 
-        /* All-apps stream using wildcard pattern */
-        char cmd[512];
-        snprintf(cmd, sizeof(cmd),
-                 "journalctl %s -u '%s*.service' -n 120 --output=with-unit --no-pager 2>/dev/null",
-                 scope == SCOPE_USER ? "--user" : "", FIRE_UNIT_PREFIX);
+        char pattern[128];
+        snprintf(pattern, sizeof(pattern), "%s*.service", FIRE_UNIT_PREFIX);
 
-        FILE *fp = popen(cmd, "r");
-        if (fp) {
-            char line[MAX_LOG_LINE_LEN];
-            while (fgets(line, sizeof(line), fp)) {
-                log_viewer_append(lv, line, false);
-            }
-            pclose(fp);
-        }
+        char *backlog_argv[16];
+        int b_idx = 0;
+        backlog_argv[b_idx++] = "journalctl";
+        if (scope == SCOPE_USER) backlog_argv[b_idx++] = "--user";
+        backlog_argv[b_idx++] = "-u";
+        backlog_argv[b_idx++] = pattern;
+        backlog_argv[b_idx++] = "-n";
+        backlog_argv[b_idx++] = "120";
+        backlog_argv[b_idx++] = "--output=with-unit";
+        backlog_argv[b_idx++] = "--no-pager";
+        backlog_argv[b_idx] = NULL;
 
-        snprintf(cmd, sizeof(cmd),
-                 "journalctl %s -u '%s*.service' -f -n 0 --output=with-unit --no-pager 2>/dev/null",
-                 scope == SCOPE_USER ? "--user" : "", FIRE_UNIT_PREFIX);
+        log_viewer_load_backlog(lv, backlog_argv);
 
-        lv->stream_pipe = log_stream_open(cmd, &lv->stream_pid);
+        char *stream_argv[16];
+        int s_idx = 0;
+        stream_argv[s_idx++] = "journalctl";
+        if (scope == SCOPE_USER) stream_argv[s_idx++] = "--user";
+        stream_argv[s_idx++] = "-u";
+        stream_argv[s_idx++] = pattern;
+        stream_argv[s_idx++] = "-f";
+        stream_argv[s_idx++] = "-n";
+        stream_argv[s_idx++] = "0";
+        stream_argv[s_idx++] = "--output=with-unit";
+        stream_argv[s_idx++] = "--no-pager";
+        stream_argv[s_idx] = NULL;
+
+        lv->stream_pipe = log_stream_open_argv(stream_argv, &lv->stream_pid);
+        return;
+    }
+
+    if (!is_valid_name(app_name)) {
         return;
     }
 
@@ -287,27 +344,37 @@ void log_viewer_set_app(LogViewer *lv, const char *app_name, SystemdScope scope)
     snprintf(lv->current_app, sizeof(lv->current_app), "%s", app_name);
     lv->current_scope = scope;
 
-    /* Single app backlog load */
-    char cmd[512];
-    snprintf(cmd, sizeof(cmd),
-             "journalctl %s -u %s%s.service -n 120 --output=short-iso --no-pager 2>/dev/null",
-             scope == SCOPE_USER ? "--user" : "", FIRE_UNIT_PREFIX, app_name);
+    char unit_svc[128];
+    snprintf(unit_svc, sizeof(unit_svc), "%s%s.service", FIRE_UNIT_PREFIX, app_name);
 
-    FILE *fp = popen(cmd, "r");
-    if (fp) {
-        char line[MAX_LOG_LINE_LEN];
-        while (fgets(line, sizeof(line), fp)) {
-            log_viewer_append(lv, line, false);
-        }
-        pclose(fp);
-    }
+    char *backlog_argv[16];
+    int b_idx = 0;
+    backlog_argv[b_idx++] = "journalctl";
+    if (scope == SCOPE_USER) backlog_argv[b_idx++] = "--user";
+    backlog_argv[b_idx++] = "-u";
+    backlog_argv[b_idx++] = unit_svc;
+    backlog_argv[b_idx++] = "-n";
+    backlog_argv[b_idx++] = "120";
+    backlog_argv[b_idx++] = "--output=short-iso";
+    backlog_argv[b_idx++] = "--no-pager";
+    backlog_argv[b_idx] = NULL;
 
-    /* Single app live stream */
-    snprintf(cmd, sizeof(cmd),
-             "journalctl %s -u %s%s.service -f -n 0 --output=short-iso --no-pager 2>/dev/null",
-             scope == SCOPE_USER ? "--user" : "", FIRE_UNIT_PREFIX, app_name);
+    log_viewer_load_backlog(lv, backlog_argv);
 
-    lv->stream_pipe = log_stream_open(cmd, &lv->stream_pid);
+    char *stream_argv[16];
+    int s_idx = 0;
+    stream_argv[s_idx++] = "journalctl";
+    if (scope == SCOPE_USER) stream_argv[s_idx++] = "--user";
+    stream_argv[s_idx++] = "-u";
+    stream_argv[s_idx++] = unit_svc;
+    stream_argv[s_idx++] = "-f";
+    stream_argv[s_idx++] = "-n";
+    stream_argv[s_idx++] = "0";
+    stream_argv[s_idx++] = "--output=short-iso";
+    stream_argv[s_idx++] = "--no-pager";
+    stream_argv[s_idx] = NULL;
+
+    lv->stream_pipe = log_stream_open_argv(stream_argv, &lv->stream_pid);
 }
 
 void log_viewer_poll(LogViewer *lv) {

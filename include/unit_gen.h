@@ -12,7 +12,10 @@ int unit_gen_create_service(const AppService *app, char *err_buf, size_t err_len
 /* Writes fire-<name>.path file if watch path is defined */
 int unit_gen_create_path(const AppService *app, char *err_buf, size_t err_len);
 
-/* Deletes both .service and .path files for a given app */
+/* Writes companion fire-<name>-restart.service oneshot unit for watch mode */
+int unit_gen_create_restart_service(const AppService *app, char *err_buf, size_t err_len);
+
+/* Deletes .service, .path, -restart.service, and .env files for a given app */
 int unit_gen_delete(const char *name, SystemdScope scope, char *err_buf, size_t err_len);
 
 /* Scans unit directory and returns list of fire-<name> service names */
