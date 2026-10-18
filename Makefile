@@ -40,7 +40,9 @@ $(TEST_TARGET): tests/test_core.o src/cJSON.o src/config.o src/unit_gen.o src/lo
 	@mkdir -p bin
 	$(CC) $^ -o $@ $(LDFLAGS)
 
-%.o: %.c
+HEADERS = $(wildcard include/*.h)
+
+%.o: %.c $(HEADERS)
 	$(CC) $(CFLAGS) -c $< -o $@
 
 debug: CFLAGS += -g -O0 -DDEBUG
