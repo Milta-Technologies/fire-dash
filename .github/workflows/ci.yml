@@ -28,11 +28,10 @@ jobs:
         run: |
           make clean
           if ! make CC="${{ matrix.compiler }}"; then
-            echo "::error::Build failed with ${{ matrix.compiler }}"
-            for f in src/*.c; do
-              echo "--- Compiling $f with ${{ matrix.compiler }} ---"
-              ${{ matrix.compiler }} -Wall -Wextra -std=c99 -pedantic -D_GNU_SOURCE -Iinclude -O2 -c "$f" || true
-            done
+            echo "### Build Failure with ${{ matrix.compiler }}" >> $GITHUB_STEP_SUMMARY
+            echo '```' >> $GITHUB_STEP_SUMMARY
+            make CC="${{ matrix.compiler }}" 2>&1 >> $GITHUB_STEP_SUMMARY || true
+            echo '```' >> $GITHUB_STEP_SUMMARY
             exit 1
           fi
 
