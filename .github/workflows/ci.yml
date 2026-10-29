@@ -8,30 +8,31 @@ on:
 
 jobs:
   build-and-test:
-    name: Build & Test (${{ matrix.compiler }})
-    runs-on: ubuntu-latest
+    name: Build & Test (${{ matrix.os }} - ${{ matrix.compiler }})
+    runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
       matrix:
-        compiler: [ gcc, clang ]
+        include:
+          - os: ubuntu-latest
+            compiler: gcc
+            install: sudo apt-get update && sudo apt-get install -y libsystemd-dev
+          - os: macos-latest
+            compiler: clang
+            install: ""
 
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
 
       - name: Install dependencies
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y libsystemd-dev clang
+        if: matrix.install != ''
+        run: ${{ matrix.install }}
 
       - name: Build with ${{ matrix.compiler }}
         run: |
           make clean
-          if ! make CC="${{ matrix.compiler }}" 2>&1 | tee /tmp/build.log; then
-            ERR_MSG=$(tail -n 25 /tmp/build.log | tr '\n' ' ' | sed 's/"/\\"/g')
-            echo "::error title=CompilerOutput::$ERR_MSG"
-            exit 1
-          fi
+          make CC="${{ matrix.compiler }}"
 
       - name: Run test suite
         run: |
@@ -39,8 +40,6 @@ jobs:
 
       - name: Test CLI smoke tests
         run: |
-          file ./bin/fdash
-          ldd ./bin/fdash || true
           ./bin/fdash --version
           ./bin/fdash --help
           ./bin/fdash list
