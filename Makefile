@@ -31,7 +31,7 @@ all: $(TARGET)
 
 $(TARGET): $(OBJ)
 	@mkdir -p bin
-	$(CC) $(OBJ) -o $@ $(LDFLAGS)
+	$(CC) $(CFLAGS) $(OBJ) -o $@ $(LDFLAGS)
 	@echo "Build complete: $(TARGET)"
 
 test: $(TEST_TARGET)
@@ -39,7 +39,7 @@ test: $(TEST_TARGET)
 
 $(TEST_TARGET): tests/test_core.o src/cJSON.o src/config.o src/unit_gen.o src/log_viewer.o src/updater.o
 	@mkdir -p bin
-	$(CC) $^ -o $@ $(LDFLAGS)
+	$(CC) $(CFLAGS) $^ -o $@ $(LDFLAGS)
 
 HEADERS = $(wildcard include/*.h)
 
