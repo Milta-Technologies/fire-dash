@@ -28,8 +28,8 @@ static TUIState *g_tui_state = NULL;
 
 static void disable_raw_mode(void) {
     if (!g_raw_enabled) return;
-    /* Ensure mouse tracking is disabled, show cursor, restore main screen */
-    WRITE_LIT(STDOUT_FILENO, "\033[?1000l\033[?1002l\033[?1006l\033[?25h\033[?1049l");
+    /* Ensure mouse tracking is disabled, show cursor, re-enable auto-wrap, restore main screen */
+    WRITE_LIT(STDOUT_FILENO, "\033[?1000l\033[?1002l\033[?1006l\033[?7h\033[?25h\033[?1049l");
     tcsetattr(STDIN_FILENO, TCSAFLUSH, &orig_termios);
     g_raw_enabled = false;
 }
@@ -63,8 +63,8 @@ static void enable_raw_mode(void) {
     raw.c_cc[VTIME] = 1;
     tcsetattr(STDIN_FILENO, TCSAFLUSH, &raw);
 
-    /* Switch to alternate screen, hide cursor, ensure mouse tracking is DISABLED */
-    WRITE_LIT(STDOUT_FILENO, "\033[?1049h\033[?25l\033[?1000l\033[?1002l\033[?1006l");
+    /* Switch to alternate screen, hide cursor, disable auto-wrap, ensure mouse tracking is DISABLED */
+    WRITE_LIT(STDOUT_FILENO, "\033[?1049h\033[?25l\033[?7l\033[?1000l\033[?1002l\033[?1006l");
     g_raw_enabled = true;
     atexit(disable_raw_mode);
 }
@@ -292,7 +292,7 @@ static void render_detail_inspector(ScreenBuffer *sb, TUIState *state, LogLine *
     int cols = state->cols;
     int rows = state->rows;
 
-    sb_append(sb, "\033[H", 3);
+    sb_append(sb, "\033[?2026h\033[H\033[?25l", 17);
 
     time_t now = time(NULL);
     struct tm *tm_info = localtime(&now);
@@ -395,8 +395,13 @@ static void render_detail_inspector(ScreenBuffer *sb, TUIState *state, LogLine *
     if (state->status_msg[0] && (time(NULL) - state->status_msg_time < 4)) {
         sb_printf(sb, " \033[38;5;226;1m⚡ %s\033[0m\033[K", state->status_msg);
     } else {
-        sb_printf(sb, " \033[38;5;244m[m] Insert Marker Below  [c] Copy to Clipboard  [↑/k] Prev Line  [↓/j] Next Line  [Esc/Enter/q] Close\033[0m\033[K");
+        if (cols >= 100) {
+            sb_printf(sb, " \033[38;5;244m[m] Insert Marker Below  [c] Copy to Clipboard  [↑/k] Prev Line  [↓/j] Next Line  [Esc/Enter/q] Close\033[0m\033[K");
+        } else {
+            sb_printf(sb, " \033[38;5;244m[m] Mark Below  [c] Copy  [↑/k] Prev  [↓/j] Next  [Esc/q] Close\033[0m\033[K");
+        }
     }
+    sb_append(sb, "\033[?2026l", 8);
 }
 
 static void update_matching_indices(TUIState *state) {
@@ -476,8 +481,8 @@ static void render_dashboard(TUIState *state, ProcessInfo *apps, int app_count) 
         return;
     }
 
-    /* Move cursor to 1,1 */
-    sb_append(&sb, "\033[H", 3);
+    /* Synchronized update begin, move cursor to 1,1 and hide cursor */
+    sb_append(&sb, "\033[?2026h\033[H\033[?25l", 17);
 
     int log_rows_avail = 4;
 
@@ -519,15 +524,25 @@ static void render_dashboard(TUIState *state, ProcessInfo *apps, int app_count) 
         } else {
             const char *upg_hint = state->has_update ? "  \033[38;5;220;1m[U] Upgrade\033[0m" : "";
             if (marker_count > 0) {
-                sb_printf(&sb, "\033[38;5;244m [↑/↓/j/k] Select Log  \033[38;5;51;1m[c] Copy Marked (%d)\033[0m\033[38;5;244m  [M] Clear  [f/Esc] Split  [l] Level: %-8s  [Space] Pause  [m] Mark%s  [q] Quit\033[0m\033[K\r\n",
-                          marker_count, log_viewer_level_name(state->log_viewer.level_filter), upg_hint);
+                if (cols >= 100) {
+                    sb_printf(&sb, "\033[38;5;244m [↑/↓/j/k] Select Log  \033[38;5;51;1m[c] Copy Marked (%d)\033[0m\033[38;5;244m  [M] Clear  [f/Esc] Split  [l] Level: %-8s  [Space] Pause  [m] Mark%s  [q] Quit\033[0m\033[K\r\n",
+                              marker_count, log_viewer_level_name(state->log_viewer.level_filter), upg_hint);
+                } else {
+                    sb_printf(&sb, "\033[38;5;244m \033[38;5;51;1m[c] Copy (%d)\033[0m\033[38;5;244m  [M] Clear  [f/Esc] Split  [m] Mark%s  [q] Quit\033[0m\033[K\r\n",
+                              marker_count, upg_hint);
+                }
             } else {
-                sb_printf(&sb, "\033[38;5;244m [↑/↓/j/k] Select Log  [f/Esc] Split View  [l] Level: %-8s  [Space] Pause  [m] Mark  [/] Search%s  [q] Quit\033[0m\033[K\r\n",
-                          log_viewer_level_name(state->log_viewer.level_filter), upg_hint);
+                if (cols >= 95) {
+                    sb_printf(&sb, "\033[38;5;244m [↑/↓/j/k] Select Log  [f/Esc] Split View  [l] Level: %-8s  [Space] Pause  [m] Mark  [/] Search%s  [q] Quit\033[0m\033[K\r\n",
+                              log_viewer_level_name(state->log_viewer.level_filter), upg_hint);
+                } else {
+                    sb_printf(&sb, "\033[38;5;244m [f/Esc] Split  [l] Level: %-8s  [m] Mark  [/] Search%s  [q] Quit\033[0m\033[K\r\n",
+                              log_viewer_level_name(state->log_viewer.level_filter), upg_hint);
+                }
             }
         }
 
-        log_rows_avail = rows - 4;
+        log_rows_avail = rows - 5;
         if (log_rows_avail < 4) log_rows_avail = 4;
     } else {
         /* 50/50 SPLIT DASHBOARD VIEW */
@@ -556,9 +571,16 @@ static void render_dashboard(TUIState *state, ProcessInfo *apps, int app_count) 
         int table_max_rows = (rows - 8) / 2;
         if (table_max_rows < 4) table_max_rows = 4;
 
-        const char *apps_header_tag = (state->focus == FOCUS_PROCESSES)
-                                      ? "\033[38;5;48;1m[ACTIVE FOCUS]\033[0m"
-                                      : "\033[38;5;240m[Tab to focus]\033[0m";
+        const char *apps_header_tag = "";
+        if (cols >= 95) {
+            apps_header_tag = (state->focus == FOCUS_PROCESSES)
+                              ? "\033[38;5;48;1m[ACTIVE FOCUS]\033[0m"
+                              : "\033[38;5;240m[Tab to focus]\033[0m";
+        } else if (cols >= 86) {
+            apps_header_tag = (state->focus == FOCUS_PROCESSES)
+                              ? "\033[38;5;48;1m[ACTIVE]\033[0m"
+                              : "\033[38;5;240m[Tab]\033[0m";
+        }
         sb_printf(&sb, "\033[38;5;248;1m  %-4s %-18s %-12s %-8s %-10s %-8s %-12s\033[0m %s\033[K\r\n",
                   "ID", "NAME", "STATUS", "PID", "MEMORY", "RESTARTS", "WATCH", apps_header_tag);
 
@@ -661,17 +683,27 @@ static void render_dashboard(TUIState *state, ProcessInfo *apps, int app_count) 
                       state->selected_log_idx + 1, marker_count > 0 ? "Copy Marked" : "Copy Line");
         } else {
             const char *focus_hint = (state->focus == FOCUS_LOGS)
-                                     ? "\033[38;5;214;1m[Tab] Focus: LOGS (↑/↓/j/k navigate)\033[0m"
-                                     : "\033[38;5;48;1m[Tab] Focus: APPS (↑/↓/j/k select)\033[0m";
+                                     ? ((cols >= 105) ? "\033[38;5;214;1m[Tab] Focus: LOGS (↑/↓/j/k navigate)\033[0m" : "\033[38;5;214;1m[Tab] LOGS\033[0m")
+                                     : ((cols >= 105) ? "\033[38;5;48;1m[Tab] Focus: APPS (↑/↓/j/k select)\033[0m" : "\033[38;5;48;1m[Tab] APPS\033[0m");
             const char *upg_hint = state->has_update ? "  \033[38;5;220;1m[U] Upgrade\033[0m" : "";
             if (marker_count > 0) {
-                sb_printf(&sb, " %s  \033[38;5;244m\033[38;5;51;1m[c] Copy Marked (%d)\033[0m\033[38;5;244m  [M] Clear  [m] Mark  [Space] Pause  [a] All  [f] Full%s  [q] Quit\033[0m\033[K\r\n", focus_hint, marker_count, upg_hint);
+                if (cols >= 100) {
+                    sb_printf(&sb, " %s  \033[38;5;51;1m[c] Copy Marked (%d)\033[0m\033[38;5;244m  [M] Clear  [m] Mark  [Space] Pause  [a] All  [f] Full%s  [q] Quit\033[0m\033[K\r\n", focus_hint, marker_count, upg_hint);
+                } else {
+                    sb_printf(&sb, " %s  \033[38;5;51;1m[c] Copy (%d)\033[0m\033[38;5;244m  [M] Clear  [f] Full%s  [q] Quit\033[0m\033[K\r\n", focus_hint, marker_count, upg_hint);
+                }
             } else {
-                sb_printf(&sb, " %s  \033[38;5;244m[a] All-Apps  [f/Enter] Fullscreen  [l] Level  [/] Search  [Space] Pause  [m] Mark%s  [q] Quit\033[0m\033[K\r\n", focus_hint, upg_hint);
+                if (cols >= 110) {
+                    sb_printf(&sb, " %s  \033[38;5;244m[a] All-Apps  [f/Enter] Fullscreen  [l] Level  [/] Search  [Space] Pause  [m] Mark%s  [q] Quit\033[0m\033[K\r\n", focus_hint, upg_hint);
+                } else if (cols >= 85) {
+                    sb_printf(&sb, " %s  \033[38;5;244m[a] All  [f] Full  [l] Level  [/] Search  [m] Mark%s  [q] Quit\033[0m\033[K\r\n", focus_hint, upg_hint);
+                } else {
+                    sb_printf(&sb, " %s  \033[38;5;244m[f] Full  [m] Mark  [/] Find%s  [q] Quit\033[0m\033[K\r\n", focus_hint, upg_hint);
+                }
             }
         }
 
-        log_rows_avail = rows - (5 + table_max_rows + 4);
+        log_rows_avail = rows - (table_max_rows + 8);
         if (log_rows_avail < 4) log_rows_avail = 4;
     }
 
@@ -682,39 +714,66 @@ static void render_dashboard(TUIState *state, ProcessInfo *apps, int app_count) 
                                          ? apps[state->selected_idx - 1].name
                                          : "none");
 
-    sb_append(&sb, "\033[38;5;238m╭─ ", 15);
+    sb_append(&sb, "\033[38;5;238m╭─ ", 18);
+    int vis_w = 3; /* "╭─ " */
+
+    char title_buf[128];
+    int title_len = snprintf(title_buf, sizeof(title_buf), "Logs: %s (%d lines) ",
+                             selected_view_name, state->log_viewer.count);
     sb_printf(&sb, "\033[38;5;214;1mLogs: %s\033[0m \033[38;5;244m(%d lines)\033[0m ",
               selected_view_name, state->log_viewer.count);
+    vis_w += title_len;
 
-    if (!state->fullscreen_logs) {
-        if (state->focus == FOCUS_LOGS) {
-            sb_printf(&sb, "\033[48;5;214;38;5;16;1m[FOCUS: LOGS]\033[0m ");
-        }
+    if (!state->fullscreen_logs && state->focus == FOCUS_LOGS) {
+        sb_printf(&sb, "\033[48;5;214;38;5;16;1m[FOCUS: LOGS]\033[0m ");
+        vis_w += 14;
     }
 
     if (state->log_viewer.level_filter == LOG_LEVEL_ERR_ONLY) {
         sb_printf(&sb, "\033[38;5;196;1m[Level: ERR ONLY]\033[0m ");
+        vis_w += 18;
     } else if (state->log_viewer.level_filter == LOG_LEVEL_WARN_ERR) {
         sb_printf(&sb, "\033[38;5;220;1m[Level: WARN+ERR]\033[0m ");
-    } else {
+        vis_w += 18;
+    } else if (cols >= 90) {
         sb_printf(&sb, "\033[38;5;244m[Level: ALL]\033[0m ");
+        vis_w += 13;
     }
 
     if (state->search_mode) {
-        sb_printf(&sb, "\033[38;5;226;1m[Search: %s_]\033[0m ", state->search_input);
+        char sbuf[64];
+        int sl = snprintf(sbuf, sizeof(sbuf), "[Search: %s_] ", state->search_input);
+        sb_printf(&sb, "\033[38;5;226;1m%s\033[0m", sbuf);
+        vis_w += sl;
     } else if (state->log_viewer.search_filter[0]) {
-        sb_printf(&sb, "\033[38;5;51m[Filter: \"%s\"]\033[0m ", state->log_viewer.search_filter);
+        char fbuf[64];
+        int fl = snprintf(fbuf, sizeof(fbuf), "[Filter: \"%s\"] ", state->log_viewer.search_filter);
+        sb_printf(&sb, "\033[38;5;51m%s\033[0m", fbuf);
+        vis_w += fl;
     }
 
     if (state->log_viewer.is_paused) {
-        sb_printf(&sb, "\033[48;5;208;38;5;16;1m[PAUSED +%d]\033[0m ", state->log_viewer.paused_buffered_count);
+        char pbuf[32];
+        int pl = snprintf(pbuf, sizeof(pbuf), "[PAUSED +%d] ", state->log_viewer.paused_buffered_count);
+        sb_printf(&sb, "\033[48;5;208;38;5;16;1m%s\033[0m", pbuf);
+        vis_w += pl;
     } else if (state->log_viewer.auto_scroll) {
-        sb_printf(&sb, "\033[38;5;48m[auto-scroll: ON]\033[0m ");
+        if (cols >= 80) {
+            sb_printf(&sb, "\033[38;5;48m[auto-scroll: ON]\033[0m ");
+            vis_w += 18;
+        }
     } else {
-        sb_printf(&sb, "\033[38;5;208m[scrolled +%d]\033[0m ", state->log_viewer.scroll_offset);
+        char sbuf[32];
+        int sl = snprintf(sbuf, sizeof(sbuf), "[scrolled +%d] ", state->log_viewer.scroll_offset);
+        sb_printf(&sb, "\033[38;5;208m%s\033[0m", sbuf);
+        vis_w += sl;
     }
 
-    for (int i = 0; i < cols - 70; i++) sb_append(&sb, "─", 3);
+    sb_append(&sb, "\033[38;5;238m", 11);
+    int fill = (cols - 1) - vis_w;
+    if (fill > 0) {
+        for (int i = 0; i < fill; i++) sb_append(&sb, "─", 3);
+    }
     sb_append(&sb, "╮\033[0m\033[K\r\n", 9);
 
     /* 5. Render Log Lines */
@@ -765,6 +824,9 @@ static void render_dashboard(TUIState *state, ProcessInfo *apps, int app_count) 
     for (int i = 0; i < cols - 2; i++) sb_append(&sb, "─", 3);
     sb_append(&sb, "╯\033[0m\033[K", 9);
 
+    /* End synchronized update */
+    sb_append(&sb, "\033[?2026l", 8);
+
     /* Single write flush */
     write(STDOUT_FILENO, sb.data, sb.len);
 }
@@ -808,20 +870,29 @@ int tui_run(SystemdScope scope) {
     pfd.fd = STDIN_FILENO;
     pfd.events = POLLIN;
 
-    uint64_t frame_count = 0;
+    bool needs_render = true;
+    time_t last_systemd_refresh = 0;
+    time_t last_render_sec = 0;
 
     while (!state.should_quit) {
         if (g_win_resized) {
             g_win_resized = 0;
             update_window_size(&state);
+            needs_render = true;
         }
 
         /* Check log pipe output */
+        bool had_dirty = state.log_viewer.is_dirty;
         log_viewer_poll(&state.log_viewer);
+        if (state.log_viewer.is_dirty && !had_dirty) {
+            needs_render = true;
+        }
 
-        /* Refresh app list & process info every ~1 second (5 frames @ 200ms) */
-        frame_count++;
-        if (frame_count % 5 == 0) {
+        time_t now = time(NULL);
+
+        /* Refresh app list & process info every ~1 second */
+        if (now - last_systemd_refresh >= 1) {
+            last_systemd_refresh = now;
             systemd_free_list(apps, app_count);
             apps = NULL;
             app_count = 0;
@@ -831,6 +902,13 @@ int tui_run(SystemdScope scope) {
             if (state.selected_idx >= total_items && total_items > 0) {
                 state.selected_idx = total_items - 1;
             }
+            needs_render = true;
+        }
+
+        /* Expire status message after 4 seconds */
+        if (state.status_msg[0] && (now - state.status_msg_time >= 4)) {
+            state.status_msg[0] = '\0';
+            needs_render = true;
         }
 
         /* If selected app changed, switch log viewer stream cleanly */
@@ -850,14 +928,20 @@ int tui_run(SystemdScope scope) {
                 log_viewer_set_app(&state.log_viewer, apps[state.selected_idx - 1].name, scope);
                 set_status(&state, "Switched to '%s' log stream", apps[state.selected_idx - 1].name);
             }
+            needs_render = true;
         }
 
-        /* Render */
-        render_dashboard(&state, apps, app_count);
+        /* Render if state is dirty or at least once per second for the clock update */
+        if (needs_render || (now != last_render_sec)) {
+            render_dashboard(&state, apps, app_count);
+            last_render_sec = now;
+            needs_render = false;
+        }
 
-        /* Wait for input with 200ms timeout */
-        int poll_res = poll(&pfd, 1, 200);
+        /* Wait for input with 100ms timeout for snappy responsiveness */
+        int poll_res = poll(&pfd, 1, 100);
         if (poll_res > 0 && (pfd.revents & POLLIN)) {
+            needs_render = true;
             char c;
             if (read(STDIN_FILENO, &c, 1) > 0) {
                 int total_items = app_count + 1;

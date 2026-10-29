@@ -9,7 +9,7 @@
 #include <time.h>
 #include <sys/types.h>
 
-#define FIRE_VERSION "1.1.0"
+#define FIRE_VERSION "1.1.1"
 #define FIRE_UNIT_PREFIX "fire-"
 #define MAX_NAME_LEN 64
 #define MAX_PATH_LEN 1024
