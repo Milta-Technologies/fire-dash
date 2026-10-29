@@ -27,11 +27,10 @@ jobs:
       - name: Build with ${{ matrix.compiler }}
         run: |
           make clean
-          if ! make CC="${{ matrix.compiler }}"; then
-            echo "### Build Failure with ${{ matrix.compiler }}" >> $GITHUB_STEP_SUMMARY
-            echo '```' >> $GITHUB_STEP_SUMMARY
-            make CC="${{ matrix.compiler }}" 2>&1 >> $GITHUB_STEP_SUMMARY || true
-            echo '```' >> $GITHUB_STEP_SUMMARY
+          if ! make CC="${{ matrix.compiler }}" 2>&1 | tee make_err.log; then
+            while IFS= read -r line; do
+              [ -n "$line" ] && echo "::error title=BuildError::$line"
+            done < make_err.log
             exit 1
           fi
 
