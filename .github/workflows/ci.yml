@@ -27,7 +27,11 @@ jobs:
       - name: Build with ${{ matrix.compiler }}
         run: |
           make clean
-          make CC="${{ matrix.compiler }}"
+          if ! make CC="${{ matrix.compiler }}" 2>&1 | tee /tmp/build.log; then
+            ERR_MSG=$(tail -n 25 /tmp/build.log | tr '\n' ' ' | sed 's/"/\\"/g')
+            echo "::error title=CompilerOutput::$ERR_MSG"
+            exit 1
+          fi
 
       - name: Run test suite
         run: |
