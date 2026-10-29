@@ -116,9 +116,10 @@ int updater_check_version(char *out_ver, size_t max_len, bool *out_has_update, b
     if (!force) {
         FILE *cfp = fopen(cache_file, "r");
         if (cfp) {
-            time_t cached_time = 0;
+            long c_time = 0;
             char cached_ver[64] = {0};
-            if (fscanf(cfp, "%ld %63s", &cached_time, cached_ver) == 2) {
+            if (fscanf(cfp, "%ld %63s", &c_time, cached_ver) == 2) {
+                time_t cached_time = (time_t)c_time;
                 fclose(cfp);
                 if (now >= cached_time && (now - cached_time) < (6 * 3600)) {
                     snprintf(out_ver, max_len, "%s", cached_ver);

@@ -26,12 +26,12 @@ jobs:
 
       - name: Build with ${{ matrix.compiler }}
         run: |
-          CC=${{ matrix.compiler }} make clean
-          CC=${{ matrix.compiler }} make
+          make clean
+          make CC="${{ matrix.compiler }}"
 
       - name: Run test suite
         run: |
-          CC=${{ matrix.compiler }} make test
+          make CC="${{ matrix.compiler }}" test
 
       - name: Test CLI smoke tests
         run: |
