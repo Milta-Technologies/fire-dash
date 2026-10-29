@@ -27,12 +27,7 @@ jobs:
       - name: Build with ${{ matrix.compiler }}
         run: |
           make clean
-          if ! make CC="${{ matrix.compiler }}" 2>&1 | tee make_err.log; then
-            while IFS= read -r line; do
-              [ -n "$line" ] && echo "::error title=BuildError::$line"
-            done < make_err.log
-            exit 1
-          fi
+          make CC="${{ matrix.compiler }}"
 
       - name: Run test suite
         run: |
@@ -40,6 +35,9 @@ jobs:
 
       - name: Test CLI smoke tests
         run: |
+          file ./bin/fdash
+          ldd ./bin/fdash || true
+          ./bin/fdash --version
           ./bin/fdash --help
           ./bin/fdash list
 
