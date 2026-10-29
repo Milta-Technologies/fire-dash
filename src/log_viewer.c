@@ -95,7 +95,20 @@ void log_viewer_cleanup(LogViewer *lv) {
     if (lv->stream_pid > 0) {
         kill(lv->stream_pid, SIGTERM);
         int status;
-        waitpid(lv->stream_pid, &status, WNOHANG);
+        bool reaped = false;
+        /* Spin with usleep / WNOHANG for up to 500ms */
+        for (int i = 0; i < 50; i++) {
+            pid_t r = waitpid(lv->stream_pid, &status, WNOHANG);
+            if (r == lv->stream_pid || r < 0) {
+                reaped = true;
+                break;
+            }
+            usleep(10000); /* 10ms */
+        }
+        if (!reaped) {
+            kill(lv->stream_pid, SIGKILL);
+            waitpid(lv->stream_pid, &status, 0);
+        }
         lv->stream_pid = 0;
     }
     if (lv->stream_pipe) {
@@ -201,6 +214,29 @@ void log_viewer_insert_marker_after(LogViewer *lv, int real_line_idx) {
     snprintf(ll->text, sizeof(ll->text), "%s", marker_text);
     ll->is_marker = true;
     lv->is_dirty = true;
+}
+
+int log_viewer_clear_markers(LogViewer *lv) {
+    if (!lv || lv->count == 0) return 0;
+    int write_pos = 0;
+    int removed = 0;
+    for (int i = 0; i < lv->count; i++) {
+        int src_idx = (lv->head + i) % MAX_LOG_LINES;
+        if (lv->lines[src_idx].is_marker) {
+            removed++;
+            continue;
+        }
+        if (write_pos != i) {
+            int dest_idx = (lv->head + write_pos) % MAX_LOG_LINES;
+            lv->lines[dest_idx] = lv->lines[src_idx];
+        }
+        write_pos++;
+    }
+    lv->count = write_pos;
+    if (removed > 0) {
+        lv->is_dirty = true;
+    }
+    return removed;
 }
 
 static void extract_app_name(const char *text, char *out, size_t out_cap) {

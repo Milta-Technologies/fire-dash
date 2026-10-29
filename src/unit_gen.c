@@ -230,6 +230,34 @@ int unit_gen_create_restart_service(const AppService *app, char *err_buf, size_t
     return 0;
 }
 
+static void write_recursive_watch_paths(FILE *fp, const char *base_dir, int *count, int max_count) {
+    if (!fp || !base_dir || *count >= max_count) return;
+    DIR *d = opendir(base_dir);
+    if (!d) return;
+
+    struct dirent *entry;
+    while ((entry = readdir(d)) != NULL) {
+        if (entry->d_name[0] == '.') continue; /* skip hidden dirs like .git, ., .. */
+        if (strcmp(entry->d_name, "node_modules") == 0 ||
+            strcmp(entry->d_name, "__pycache__") == 0 ||
+            strcmp(entry->d_name, ".venv") == 0 ||
+            strcmp(entry->d_name, "venv") == 0) continue;
+
+        char subpath[MAX_PATH_LEN];
+        snprintf(subpath, sizeof(subpath), "%s/%s", base_dir, entry->d_name);
+
+        struct stat st;
+        if (stat(subpath, &st) == 0 && S_ISDIR(st.st_mode)) {
+            fprintf(fp, "PathModified=%s\n", subpath);
+            (*count)++;
+            if (*count < max_count) {
+                write_recursive_watch_paths(fp, subpath, count, max_count);
+            }
+        }
+    }
+    closedir(d);
+}
+
 int unit_gen_create_path(const AppService *app, char *err_buf, size_t err_len) {
     char dir[MAX_PATH_LEN];
     char file_path[MAX_PATH_LEN];
@@ -266,6 +294,13 @@ int unit_gen_create_path(const AppService *app, char *err_buf, size_t err_len) {
 
     fprintf(fp, "[Path]\n");
     fprintf(fp, "PathModified=%s\n", app->watch);
+
+    struct stat st;
+    if (stat(app->watch, &st) == 0 && S_ISDIR(st.st_mode)) {
+        int count = 1;
+        write_recursive_watch_paths(fp, app->watch, &count, 512);
+    }
+
     fprintf(fp, "Unit=%s%s-restart.service\n\n", FIRE_UNIT_PREFIX, app->name);
 
     fprintf(fp, "[Install]\n");

@@ -46,8 +46,12 @@ Running `fdash` without arguments (or typing `fdash monit`) opens the split-pane
 - `←` / `→`: Switch focus between Process Table and Live Logs
 - `Tab`: Toggle focus between Process Table and Live Logs
 - `Enter` or `o`: Open **Log Detail Inspector** for selected log line (or toggle Fullscreen if no log is selected)
-- `m`: Insert a visual checkpoint marker (`─── [MARK: HH:MM:SS] ───`) **directly below the selected log line** (or at bottom if none selected)
-- `c`: Copy selected log payload to clipboard (`pbcopy` / `xclip` / `wl-copy`)
+- `m`: Insert a visual checkpoint marker (`─── [MARK: HH:MM:SS] ───`) below selected log line (or at bottom if none selected)
+- `M`: Clear all checkpoint markers
+- `c`: Copy to clipboard (`pbcopy` / `wl-copy` / `xclip` / OSC 52 terminal clipboard):
+  - **1 marker placed**: copies all logs below the marker to bottom (clean text for AI)
+  - **2 markers placed**: copies all logs between the two markers
+  - **0 markers placed**: copies the selected log line / inspected payload
 - `a`: Quick-toggle between active single-app logs and unified `[ALL APPS]` stream
 - `f`: Toggle **Fullscreen Log View** (expands logs to full terminal height)
 - `l`: Cycle log triage filter level: `ALL` ➔ `WARN+ERR` ➔ `ERR ONLY`
@@ -59,9 +63,9 @@ Running `fdash` without arguments (or typing `fdash monit`) opens the split-pane
 - `s`: Start selected application (or all applications if `[ALL APPS]` is selected)
 - `x`: Stop selected application (or all applications if `[ALL APPS]` is selected)
 - `r`: Restart selected application (or all applications if `[ALL APPS]` is selected)
-- `d`: Delete service unit and unregister from systemd (when process table is focused)
+- `d`: Delete service unit with interactive safety confirmation prompt `[y/n/Esc]` (when process table is focused)
 - `Esc`: Unselect log line, close Inspector, exit fullscreen, or clear search filter
-- `q` or `Ctrl+C`: Exit dashboard
+- `q` or `Ctrl+C`: Exit dashboard cleanly (kills & reaps streaming background processes)
 
 ---
 

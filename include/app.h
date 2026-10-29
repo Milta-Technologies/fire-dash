@@ -18,6 +18,21 @@
 
 #define WRITE_LIT(fd, lit) write((fd), (lit), sizeof(lit) - 1)
 
+/* Shared memory size formatter — used by both CLI list and TUI dashboard */
+static inline void format_mem(uint64_t bytes, char *out, size_t max_len) {
+    if (bytes == 0 || bytes == (uint64_t)-1 || bytes == 18446744073709551615ULL) {
+        snprintf(out, max_len, "0 B");
+    } else if (bytes < 1024) {
+        snprintf(out, max_len, "%llu B", (unsigned long long)bytes);
+    } else if (bytes < 1024 * 1024) {
+        snprintf(out, max_len, "%.1f KB", (double)bytes / 1024.0);
+    } else if (bytes < 1024ULL * 1024 * 1024) {
+        snprintf(out, max_len, "%.1f MB", (double)bytes / (1024.0 * 1024.0));
+    } else {
+        snprintf(out, max_len, "%.2f GB", (double)bytes / (1024.0 * 1024.0 * 1024.0));
+    }
+}
+
 bool is_valid_name(const char *name);
 
 typedef enum {

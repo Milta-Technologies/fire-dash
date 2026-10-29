@@ -23,6 +23,8 @@ static void handle_winch(int sig) {
     g_win_resized = 1;
 }
 
+static TUIState *g_tui_state = NULL;
+
 static void disable_raw_mode(void) {
     if (!g_raw_enabled) return;
     /* Ensure mouse tracking is disabled, show cursor, restore main screen */
@@ -33,6 +35,18 @@ static void disable_raw_mode(void) {
 
 static void handle_sig_exit(int sig) {
     (void)sig;
+    if (g_tui_state && g_tui_state->log_viewer.stream_pid > 0) {
+        pid_t pid = g_tui_state->log_viewer.stream_pid;
+        kill(pid, SIGTERM);
+        int status;
+        for (int i = 0; i < 10; i++) {
+            pid_t r = waitpid(pid, &status, WNOHANG);
+            if (r == pid || r < 0) break;
+            usleep(5000);
+        }
+        kill(pid, SIGKILL);
+        waitpid(pid, &status, WNOHANG);
+    }
     disable_raw_mode();
     _exit(0);
 }
@@ -80,10 +94,21 @@ static void sb_init(ScreenBuffer *sb) {
 }
 
 static void sb_free(ScreenBuffer *sb) {
-    free(sb->data);
-    sb->data = NULL;
+    if (sb->data) {
+        free(sb->data);
+        sb->data = NULL;
+    }
     sb->len = 0;
     sb->cap = 0;
+}
+
+static void sb_reset(ScreenBuffer *sb) {
+    if (!sb->data) {
+        sb_init(sb);
+    } else {
+        sb->len = 0;
+        sb->data[0] = '\0';
+    }
 }
 
 static void sb_append(ScreenBuffer *sb, const char *s, size_t slen) {
@@ -112,20 +137,6 @@ static void sb_printf(ScreenBuffer *sb, const char *fmt, ...) {
     }
 }
 
-static void format_mem(uint64_t bytes, char *out, size_t max_len) {
-    if (bytes == 0 || bytes == (uint64_t)-1 || bytes == 18446744073709551615ULL) {
-        snprintf(out, max_len, "0 B");
-    } else if (bytes < 1024) {
-        snprintf(out, max_len, "%llu B", (unsigned long long)bytes);
-    } else if (bytes < 1024 * 1024) {
-        snprintf(out, max_len, "%.1f KB", (double)bytes / 1024.0);
-    } else if (bytes < 1024ULL * 1024 * 1024) {
-        snprintf(out, max_len, "%.1f MB", (double)bytes / (1024.0 * 1024.0));
-    } else {
-        snprintf(out, max_len, "%.2f GB", (double)bytes / (1024.0 * 1024.0 * 1024.0));
-    }
-}
-
 static void set_status(TUIState *state, const char *fmt, ...) {
     va_list ap;
     va_start(ap, fmt);
@@ -134,12 +145,123 @@ static void set_status(TUIState *state, const char *fmt, ...) {
     state->status_msg_time = time(NULL);
 }
 
+static void osc52_copy(const char *text) {
+    static const char b64[] = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    size_t len = strlen(text);
+    if (len > 100000) return; /* safety cap for escape sequence */
+    WRITE_LIT(STDOUT_FILENO, "\033]52;c;");
+    for (size_t i = 0; i < len; i += 3) {
+        uint32_t oct_a = (unsigned char)text[i];
+        uint32_t oct_b = (i + 1 < len) ? (unsigned char)text[i + 1] : 0;
+        uint32_t oct_c = (i + 2 < len) ? (unsigned char)text[i + 2] : 0;
+        uint32_t triple = (oct_a << 16) | (oct_b << 8) | oct_c;
+        char out[4];
+        out[0] = b64[(triple >> 18) & 0x3F];
+        out[1] = b64[(triple >> 12) & 0x3F];
+        out[2] = (i + 1 < len) ? b64[(triple >> 6) & 0x3F] : '=';
+        out[3] = (i + 2 < len) ? b64[triple & 0x3F] : '=';
+        write(STDOUT_FILENO, out, 4);
+    }
+    WRITE_LIT(STDOUT_FILENO, "\007");
+}
+
 static bool copy_to_clipboard(const char *text) {
     if (!text || !*text) return false;
+    bool ok = false;
     FILE *fp = popen("pbcopy 2>/dev/null || wl-copy 2>/dev/null || xclip -selection clipboard 2>/dev/null || xsel --clipboard --input 2>/dev/null", "w");
-    if (!fp) return false;
-    fputs(text, fp);
-    pclose(fp);
+    if (fp) {
+        fputs(text, fp);
+        if (pclose(fp) == 0) ok = true;
+    }
+    osc52_copy(text);
+    return ok || true;
+}
+
+static bool copy_marked_logs(TUIState *state) {
+    LogViewer *lv = &state->log_viewer;
+    if (state->match_count == 0) {
+        set_status(state, "No logs available to copy");
+        return false;
+    }
+
+    int marker_k[MAX_LOG_LINES];
+    int marker_count = 0;
+    for (int k = 0; k < state->match_count; k++) {
+        int r_idx = state->matching_indices[k];
+        if (lv->lines[r_idx].is_marker) {
+            marker_k[marker_count++] = k;
+        }
+    }
+
+    if (marker_count == 0) {
+        if (state->selected_log_idx >= 0 && state->selected_log_idx < state->match_count) {
+            int r_idx = state->matching_indices[state->selected_log_idx];
+            copy_to_clipboard(lv->lines[r_idx].text);
+            set_status(state, "✔ Copied selected log line to clipboard");
+            return true;
+        } else {
+            set_status(state, "No markers set. Press [m] to add a marker, or select a line.");
+            return false;
+        }
+    }
+
+    int start_k = 0;
+    int end_k = 0;
+    if (marker_count == 1) {
+        start_k = marker_k[0] + 1;
+        end_k = state->match_count - 1;
+    } else {
+        start_k = marker_k[marker_count - 2] + 1;
+        end_k = marker_k[marker_count - 1] - 1;
+    }
+
+    if (start_k > end_k) {
+        set_status(state, "No log lines found %s to copy",
+                   marker_count == 1 ? "below marker" : "between markers");
+        return false;
+    }
+
+    size_t total_len = 0;
+    int line_count = 0;
+    for (int k = start_k; k <= end_k; k++) {
+        int r_idx = state->matching_indices[k];
+        if (lv->lines[r_idx].is_marker) continue;
+        total_len += strlen(lv->lines[r_idx].text) + 1;
+        line_count++;
+    }
+
+    if (line_count == 0) {
+        set_status(state, "No log lines found %s to copy",
+                   marker_count == 1 ? "below marker" : "between markers");
+        return false;
+    }
+
+    char *buf = malloc(total_len + 1);
+    if (!buf) {
+        set_status(state, "Memory allocation failed");
+        return false;
+    }
+
+    size_t cur = 0;
+    for (int k = start_k; k <= end_k; k++) {
+        int r_idx = state->matching_indices[k];
+        if (lv->lines[r_idx].is_marker) continue;
+        const char *txt = lv->lines[r_idx].text;
+        size_t tlen = strlen(txt);
+        memcpy(buf + cur, txt, tlen);
+        cur += tlen;
+        buf[cur++] = '\n';
+    }
+    buf[cur] = '\0';
+
+    copy_to_clipboard(buf);
+    free(buf);
+
+    if (marker_count == 1) {
+        set_status(state, "✔ Copied %d log lines (below marker) to clipboard", line_count);
+    } else {
+        set_status(state, "✔ Copied %d log lines (between markers) to clipboard", line_count);
+    }
     return true;
 }
 
@@ -309,9 +431,11 @@ static void update_matching_indices(TUIState *state) {
     lv->is_dirty = false;
 }
 
+static ScreenBuffer g_screen_buf = {0};
+
 static void render_dashboard(TUIState *state, ProcessInfo *apps, int app_count) {
-    ScreenBuffer sb;
-    sb_init(&sb);
+#define sb g_screen_buf
+    sb_reset(&sb);
 
     int cols = state->cols;
     int rows = state->rows;
@@ -348,7 +472,6 @@ static void render_dashboard(TUIState *state, ProcessInfo *apps, int app_count) 
     if (state->show_detail && state->selected_log_idx >= 0 && state->selected_log_idx < match_count) {
         render_detail_inspector(&sb, state, &lv->lines[matching_indices[state->selected_log_idx]], state->selected_log_idx, match_count);
         write(STDOUT_FILENO, sb.data, sb.len);
-        sb_free(&sb);
         return;
     }
 
@@ -373,13 +496,24 @@ static void render_dashboard(TUIState *state, ProcessInfo *apps, int app_count) 
         }
         sb_printf(&sb, "\033[38;5;244m%s\033[0m\033[K\r\n", time_str);
 
+        int marker_count = 0;
+        for (int k = 0; k < match_count; k++) {
+            if (lv->lines[matching_indices[k]].is_marker) marker_count++;
+        }
+
         if (state->status_msg[0] && (time(NULL) - state->status_msg_time < 4)) {
             sb_printf(&sb, " \033[38;5;226;1m⚡ %s\033[0m\033[K\r\n", state->status_msg);
         } else if (state->selected_log_idx >= 0) {
-            sb_printf(&sb, " \033[38;5;220;1m[Line #%d Selected]\033[0m \033[38;5;244m[Enter/o] Details  [m] Mark Below  [c] Copy  [Esc] Unselect  [↑/↓] Navigate\033[0m\033[K\r\n", state->selected_log_idx + 1);
+            sb_printf(&sb, " \033[38;5;220;1m[Line #%d Selected]\033[0m \033[38;5;244m[Enter/o] Details  [m] Mark Below  [c] %s  [Esc] Unselect  [↑/↓] Navigate\033[0m\033[K\r\n",
+                      state->selected_log_idx + 1, marker_count > 0 ? "Copy Marked" : "Copy Line");
         } else {
-            sb_printf(&sb, "\033[38;5;244m [↑/↓/j/k] Select Log  [f/Esc] Split View  [l] Level: %-8s  [Space] Pause  [m] Mark  [/] Search  [q] Quit\033[0m\033[K\r\n",
-                      log_viewer_level_name(state->log_viewer.level_filter));
+            if (marker_count > 0) {
+                sb_printf(&sb, "\033[38;5;244m [↑/↓/j/k] Select Log  \033[38;5;51;1m[c] Copy Marked (%d)\033[0m\033[38;5;244m  [M] Clear  [f/Esc] Split  [l] Level: %-8s  [Space] Pause  [m] Mark  [q] Quit\033[0m\033[K\r\n",
+                          marker_count, log_viewer_level_name(state->log_viewer.level_filter));
+            } else {
+                sb_printf(&sb, "\033[38;5;244m [↑/↓/j/k] Select Log  [f/Esc] Split View  [l] Level: %-8s  [Space] Pause  [m] Mark  [/] Search  [q] Quit\033[0m\033[K\r\n",
+                          log_viewer_level_name(state->log_viewer.level_filter));
+            }
         }
 
         log_rows_avail = rows - 4;
@@ -495,15 +629,27 @@ static void render_dashboard(TUIState *state, ProcessInfo *apps, int app_count) 
         for (int i = 0; i < cols; i++) sb_append(&sb, "─", 3);
         sb_append(&sb, "\033[0m\033[K\r\n", 7);
 
-        if (state->status_msg[0] && (time(NULL) - state->status_msg_time < 4)) {
+        int marker_count = 0;
+        for (int k = 0; k < match_count; k++) {
+            if (lv->lines[matching_indices[k]].is_marker) marker_count++;
+        }
+
+        if (state->confirm_delete) {
+            sb_printf(&sb, " \033[48;5;196;38;5;231;1m ⚠ CONFIRM DELETE \033[0m \033[38;5;196;1mDelete service '%s'?\033[0m \033[38;5;220;1m[y] Confirm  [n/Esc] Cancel\033[0m\033[K\r\n", state->confirm_delete_name);
+        } else if (state->status_msg[0] && (time(NULL) - state->status_msg_time < 4)) {
             sb_printf(&sb, " \033[38;5;226;1m⚡ %s\033[0m\033[K\r\n", state->status_msg);
         } else if (state->selected_log_idx >= 0) {
-            sb_printf(&sb, " \033[38;5;220;1m[Line #%d Selected]\033[0m \033[38;5;244m[Enter/o] Details  [m] Mark Below  [c] Copy  [Esc] Unselect  [↑/↓] Navigate\033[0m\033[K\r\n", state->selected_log_idx + 1);
+            sb_printf(&sb, " \033[38;5;220;1m[Line #%d Selected]\033[0m \033[38;5;244m[Enter/o] Details  [m] Mark Below  [c] %s  [Esc] Unselect  [↑/↓] Navigate\033[0m\033[K\r\n",
+                      state->selected_log_idx + 1, marker_count > 0 ? "Copy Marked" : "Copy Line");
         } else {
             const char *focus_hint = (state->focus == FOCUS_LOGS)
                                      ? "\033[38;5;214;1m[Tab] Focus: LOGS (↑/↓/j/k navigate)\033[0m"
                                      : "\033[38;5;48;1m[Tab] Focus: APPS (↑/↓/j/k select)\033[0m";
-            sb_printf(&sb, " %s  \033[38;5;244m[a] All-Apps  [f/Enter] Fullscreen  [l] Level  [/] Search  [Space] Pause  [m] Mark  [q] Quit\033[0m\033[K\r\n", focus_hint);
+            if (marker_count > 0) {
+                sb_printf(&sb, " %s  \033[38;5;244m\033[38;5;51;1m[c] Copy Marked (%d)\033[0m\033[38;5;244m  [M] Clear  [m] Mark  [Space] Pause  [a] All  [f] Full  [q] Quit\033[0m\033[K\r\n", focus_hint, marker_count);
+            } else {
+                sb_printf(&sb, " %s  \033[38;5;244m[a] All-Apps  [f/Enter] Fullscreen  [l] Level  [/] Search  [Space] Pause  [m] Mark  [q] Quit\033[0m\033[K\r\n", focus_hint);
+            }
         }
 
         log_rows_avail = rows - (5 + table_max_rows + 4);
@@ -602,8 +748,8 @@ static void render_dashboard(TUIState *state, ProcessInfo *apps, int app_count) 
 
     /* Single write flush */
     write(STDOUT_FILENO, sb.data, sb.len);
-    sb_free(&sb);
 }
+#undef sb
 
 int tui_run(SystemdScope scope) {
     TUIState state;
@@ -619,9 +765,11 @@ int tui_run(SystemdScope scope) {
     state.log_viewer.auto_scroll = true;
     log_viewer_init(&state.log_viewer);
 
+    g_tui_state = &state;
     signal(SIGWINCH, handle_winch);
     signal(SIGINT, handle_sig_exit);
     signal(SIGTERM, handle_sig_exit);
+    signal(SIGHUP, handle_sig_exit);
     enable_raw_mode();
     update_window_size(&state);
 
@@ -697,6 +845,33 @@ int tui_run(SystemdScope scope) {
                 update_matching_indices(&state);
                 int *matching_indices = state.matching_indices;
                 int match_count = state.match_count;
+
+                /* 0. If Delete Confirmation is active */
+                if (state.confirm_delete) {
+                    if (c == 'y' || c == 'Y') {
+                        state.confirm_delete = false;
+                        char name[MAX_NAME_LEN];
+                        snprintf(name, sizeof(name), "%s", state.confirm_delete_name);
+                        systemd_stop_unit(name, scope);
+                        systemd_disable_unit(name, scope);
+                        unit_gen_delete(name, scope, NULL, 0);
+                        systemd_daemon_reload(scope);
+                        set_status(&state, "✔ Permanently deleted service '%s'", name);
+                        systemd_free_list(apps, app_count);
+                        apps = NULL;
+                        app_count = 0;
+                        systemd_list_all(scope, &apps, &app_count);
+                        total_items = app_count + 1;
+                        if (state.selected_idx >= total_items && total_items > 0) {
+                            state.selected_idx = total_items - 1;
+                        }
+                    } else if (c == 'n' || c == 'N' || c == 27 || c == 'q' || c == 'Q') {
+                        state.confirm_delete = false;
+                        state.confirm_delete_name[0] = '\0';
+                        set_status(&state, "Cancelled deletion");
+                    }
+                    continue;
+                }
 
                 /* 1. If Log Detail Inspector is currently open */
                 if (state.show_detail) {
@@ -786,11 +961,7 @@ int tui_run(SystemdScope scope) {
                         set_status(&state, state.fullscreen_logs ? "Entered Fullscreen Log View" : "Exited Fullscreen Log View");
                     }
                 } else if (c == 'c' || c == 'C') {
-                    if (state.selected_log_idx >= 0 && state.selected_log_idx < match_count) {
-                        int r_idx = matching_indices[state.selected_log_idx];
-                        copy_to_clipboard(lv->lines[r_idx].text);
-                        set_status(&state, "✔ Copied selected log line to clipboard");
-                    }
+                    copy_marked_logs(&state);
                 } else if (c == ' ') {
                     log_viewer_toggle_pause(&state.log_viewer);
                     if (state.log_viewer.is_paused) {
@@ -798,14 +969,21 @@ int tui_run(SystemdScope scope) {
                     } else {
                         set_status(&state, "Log stream RESUMED (auto-scroll ON)");
                     }
-                } else if (c == 'm' || c == 'M') {
+                } else if (c == 'm') {
                     if (state.selected_log_idx >= 0 && state.selected_log_idx < match_count) {
                         int r_idx = matching_indices[state.selected_log_idx];
                         log_viewer_insert_marker_after(&state.log_viewer, r_idx);
                         set_status(&state, "✔ Inserted checkpoint marker below line #%d", state.selected_log_idx + 1);
                     } else {
                         log_viewer_add_marker(&state.log_viewer);
-                        set_status(&state, "Inserted visual checkpoint marker");
+                        set_status(&state, "✔ Inserted checkpoint marker (press [c] to copy logs below)");
+                    }
+                } else if (c == 'M') {
+                    int cleared = log_viewer_clear_markers(&state.log_viewer);
+                    if (cleared > 0) {
+                        set_status(&state, "✔ Cleared %d checkpoint marker%s", cleared, cleared > 1 ? "s" : "");
+                    } else {
+                        set_status(&state, "No checkpoint markers to clear");
                     }
                 } else if (c == 'l' || c == 'L') {
                     log_viewer_set_level_filter(&state.log_viewer, (state.log_viewer.level_filter + 1) % 3);
@@ -1042,19 +1220,9 @@ int tui_run(SystemdScope scope) {
                         log_viewer_scroll_down(&state.log_viewer, 5);
                     } else if (state.selected_idx > 0 && state.selected_idx <= app_count) {
                         const char *name = apps[state.selected_idx - 1].name;
-                        systemd_stop_unit(name, scope);
-                        systemd_disable_unit(name, scope);
-                        unit_gen_delete(name, scope, NULL, 0);
-                        systemd_daemon_reload(scope);
-                        set_status(&state, "Deleted '%s'", name);
-                        systemd_free_list(apps, app_count);
-                        apps = NULL;
-                        app_count = 0;
-                        systemd_list_all(scope, &apps, &app_count);
-                        total_items = app_count + 1;
-                        if (state.selected_idx >= total_items && total_items > 0) {
-                            state.selected_idx = total_items - 1;
-                        }
+                        state.confirm_delete = true;
+                        snprintf(state.confirm_delete_name, sizeof(state.confirm_delete_name), "%s", name);
+                        set_status(&state, "⚠ Delete '%s'? Press [y] to confirm, [n/Esc] to cancel", name);
                     }
                 }
             }
@@ -1064,6 +1232,8 @@ int tui_run(SystemdScope scope) {
     log_viewer_cleanup(&state.log_viewer);
     systemd_free_list(apps, app_count);
     systemd_cleanup();
+    sb_free(&g_screen_buf);
+    g_tui_state = NULL;
     disable_raw_mode();
     return 0;
 }

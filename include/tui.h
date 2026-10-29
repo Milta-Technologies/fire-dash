@@ -28,6 +28,8 @@ typedef struct {
     int matching_indices[MAX_LOG_LINES];
     int match_count;
     bool should_quit;
+    bool confirm_delete;
+    char confirm_delete_name[MAX_NAME_LEN];
 } TUIState;
 
 /* Starts the interactive TUI event loop */

@@ -378,36 +378,136 @@ int systemd_reset_failed(const char *name, SystemdScope scope) {
     }
 }
 
-/* Reads live process memory & CPU directly from /proc on Linux or libproc on macOS */
-static void read_proc_stats(pid_t pid, uint64_t *mem_bytes, double *cpu_percent) {
-    if (pid <= 0) return;
-
 #if defined(__linux__)
+static uint64_t linux_get_single_rss(pid_t pid) {
     char path[128];
-    FILE *fp;
-
-    /* Memory via /proc/[pid]/statm */
     snprintf(path, sizeof(path), "/proc/%d/statm", pid);
-    fp = fopen(path, "r");
+    FILE *fp = fopen(path, "r");
+    if (!fp) return 0;
+    long total_pages = 0;
+    long resident_pages = 0;
+    uint64_t mem = 0;
+    if (fscanf(fp, "%ld %ld", &total_pages, &resident_pages) == 2) {
+        long page_size = sysconf(_SC_PAGESIZE);
+        if (page_size > 0 && resident_pages > 0) {
+            mem = (uint64_t)resident_pages * (uint64_t)page_size;
+        }
+    }
+    fclose(fp);
+    return mem;
+}
+
+static uint64_t linux_sum_proc_tree(pid_t pid, int depth) {
+    if (pid <= 0 || depth > 8) return 0;
+    uint64_t total = linux_get_single_rss(pid);
+
+    char path[128];
+    snprintf(path, sizeof(path), "/proc/%d/task/%d/children", pid, pid);
+    FILE *fp = fopen(path, "r");
     if (fp) {
-        long total_pages = 0;
-        long resident_pages = 0;
-        if (fscanf(fp, "%ld %ld", &total_pages, &resident_pages) == 2) {
-            long page_size = sysconf(_SC_PAGESIZE);
-            if (page_size > 0 && resident_pages > 0) {
-                *mem_bytes = (uint64_t)resident_pages * (uint64_t)page_size;
+        pid_t child_pid;
+        while (fscanf(fp, "%d", &child_pid) == 1) {
+            if (child_pid > 0 && child_pid != pid) {
+                total += linux_sum_proc_tree(child_pid, depth + 1);
             }
         }
         fclose(fp);
     }
+    return total;
+}
 
-    (void)cpu_percent;
+static uint64_t linux_read_cgroup_memory(pid_t pid) {
+    char path[128];
+    snprintf(path, sizeof(path), "/proc/%d/cgroup", pid);
+    FILE *fp = fopen(path, "r");
+    if (!fp) return 0;
+
+    char line[512];
+    char cg_path[512] = {0};
+    while (fgets(line, sizeof(line), fp)) {
+        /* cgroup v2 format: "0::<path>" */
+        if (strncmp(line, "0::", 3) == 0) {
+            char *p = line + 3;
+            size_t len = strlen(p);
+            while (len > 0 && (p[len - 1] == '\r' || p[len - 1] == '\n' || p[len - 1] == ' ')) {
+                p[--len] = '\0';
+            }
+            if (len > 0 && strcmp(p, "/") != 0) {
+                snprintf(cg_path, sizeof(cg_path), "%s", p);
+                break;
+            }
+        }
+    }
+    fclose(fp);
+
+    if (cg_path[0]) {
+        char mem_file[1024];
+        snprintf(mem_file, sizeof(mem_file), "/sys/fs/cgroup%s/memory.current", cg_path);
+        FILE *mfp = fopen(mem_file, "r");
+        if (mfp) {
+            uint64_t bytes = 0;
+            if (fscanf(mfp, "%llu", (unsigned long long *)&bytes) == 1) {
+                fclose(mfp);
+                if (bytes > 0 && bytes != (uint64_t)-1) return bytes;
+            } else {
+                fclose(mfp);
+            }
+        }
+    }
+    return 0;
+}
 #elif defined(__APPLE__)
+static uint64_t macos_sum_proc_tree(pid_t pid, int depth) {
+    if (pid <= 0 || depth > 8) return 0;
+    uint64_t total = 0;
+
     struct proc_taskinfo pti;
     int ret = proc_pidinfo(pid, PROC_PIDTASKINFO, 0, &pti, sizeof(pti));
     if (ret == (int)sizeof(pti) && pti.pti_resident_size > 0) {
-        *mem_bytes = (uint64_t)pti.pti_resident_size;
+        total += (uint64_t)pti.pti_resident_size;
     }
+
+    pid_t children[64];
+    int bytes = proc_listchildpids(pid, children, sizeof(children));
+    if (bytes > 0) {
+        int count = bytes / (int)sizeof(pid_t);
+        for (int i = 0; i < count; i++) {
+            if (children[i] > 0 && children[i] != pid) {
+                total += macos_sum_proc_tree(children[i], depth + 1);
+            }
+        }
+    }
+    return total;
+}
+#endif
+
+/* Reads live process memory & CPU with multi-process tree aggregation */
+static void read_proc_stats(pid_t pid, uint64_t *mem_bytes, double *cpu_percent) {
+    if (pid <= 0) return;
+
+#if defined(__linux__)
+    /* Tier 1: Authoritative cgroup v2 memory.current */
+    uint64_t cg_mem = linux_read_cgroup_memory(pid);
+    if (cg_mem > 0) {
+        *mem_bytes = cg_mem;
+        (void)cpu_percent;
+        return;
+    }
+
+    /* Tier 2: Sum memory across process tree (workers / child processes) */
+    uint64_t tree_mem = linux_sum_proc_tree(pid, 0);
+    if (tree_mem > 0) {
+        *mem_bytes = tree_mem;
+        (void)cpu_percent;
+        return;
+    }
+
+    /* Tier 3: Single PID fallback */
+    *mem_bytes = linux_get_single_rss(pid);
+    (void)cpu_percent;
+
+#elif defined(__APPLE__)
+    *mem_bytes = macos_sum_proc_tree(pid, 0);
     (void)cpu_percent;
 #else
     (void)pid;

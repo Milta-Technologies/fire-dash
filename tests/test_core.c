@@ -225,6 +225,123 @@ static void test_log_viewer_core(void) {
     printf("PASS\n");
 }
 
+static void test_format_mem(void) {
+    printf("[TEST] Testing shared format_mem()... ");
+    char buf[64];
+
+    format_mem(0, buf, sizeof(buf));
+    assert(strcmp(buf, "0 B") == 0);
+
+    format_mem((uint64_t)-1, buf, sizeof(buf));
+    assert(strcmp(buf, "0 B") == 0);
+
+    format_mem(512, buf, sizeof(buf));
+    assert(strcmp(buf, "512 B") == 0);
+
+    format_mem(1024 * 512, buf, sizeof(buf));
+    assert(strcmp(buf, "512.0 KB") == 0);
+
+    format_mem(1024ULL * 1024 * 75, buf, sizeof(buf));
+    assert(strcmp(buf, "75.0 MB") == 0);
+
+    format_mem(1024ULL * 1024 * 1024 * 2, buf, sizeof(buf));
+    assert(strcmp(buf, "2.00 GB") == 0);
+
+    printf("PASS\n");
+}
+
+static void test_marker_clear_and_copy(void) {
+    printf("[TEST] Testing marker clear and compaction... ");
+    LogViewer lv;
+    log_viewer_init(&lv);
+
+    log_viewer_append(&lv, "Line 1: system start", false);
+    log_viewer_append(&lv, "Line 2: worker boot", false);
+    log_viewer_add_marker(&lv);
+    log_viewer_append(&lv, "Line 3: query executed", false);
+    log_viewer_append(&lv, "Line 4: user logged in", false);
+    log_viewer_add_marker(&lv);
+    log_viewer_append(&lv, "Line 5: shutdown signal", false);
+
+    assert(lv.count == 7);
+    assert(lv.lines[2].is_marker == true);
+    assert(lv.lines[5].is_marker == true);
+
+    /* Verify clearing markers removes both markers and compacts array */
+    int removed = log_viewer_clear_markers(&lv);
+    assert(removed == 2);
+    assert(lv.count == 5);
+    for (int i = 0; i < lv.count; i++) {
+        assert(lv.lines[i].is_marker == false);
+    }
+    assert(strstr(lv.lines[0].text, "Line 1") != NULL);
+    assert(strstr(lv.lines[1].text, "Line 2") != NULL);
+    assert(strstr(lv.lines[2].text, "Line 3") != NULL);
+    assert(strstr(lv.lines[3].text, "Line 4") != NULL);
+    assert(strstr(lv.lines[4].text, "Line 5") != NULL);
+
+    log_viewer_cleanup(&lv);
+    printf("PASS\n");
+}
+
+static void test_recursive_watch(void) {
+    printf("[TEST] Testing recursive watch mode in unit_gen_create_path()... ");
+    const char *base = "/tmp/fdash_test_watch_tree";
+    char sub1[256], sub2[256], nested[256];
+    snprintf(sub1, sizeof(sub1), "%s/src", base);
+    snprintf(sub2, sizeof(sub2), "%s/pkg", base);
+    snprintf(nested, sizeof(nested), "%s/pkg/sub", base);
+
+    mkdir(base, 0755);
+    mkdir(sub1, 0755);
+    mkdir(sub2, 0755);
+    mkdir(nested, 0755);
+
+    AppService app;
+    memset(&app, 0, sizeof(app));
+    snprintf(app.name, sizeof(app.name), "watch-test-app");
+    snprintf(app.script, sizeof(app.script), "sleep 10");
+    snprintf(app.cwd, sizeof(app.cwd), "/tmp");
+    snprintf(app.watch, sizeof(app.watch), "%s", base);
+    app.scope = SCOPE_USER;
+    app.restart_sec = 2;
+
+    char err_buf[256];
+    int res = unit_gen_create_path(&app, err_buf, sizeof(err_buf));
+    assert(res == 0);
+
+    /* Read generated .path unit */
+    char dir[MAX_PATH_LEN];
+    unit_gen_get_dir(SCOPE_USER, dir, sizeof(dir));
+    char path_file[MAX_PATH_LEN];
+    snprintf(path_file, sizeof(path_file), "%s/%s%s.path", dir, FIRE_UNIT_PREFIX, app.name);
+
+    FILE *fp = fopen(path_file, "r");
+    assert(fp != NULL);
+
+    char content[4096] = {0};
+    fread(content, 1, sizeof(content) - 1, fp);
+    fclose(fp);
+
+    /* Verify all subdirectories are present with PathModified */
+    assert(strstr(content, "PathModified=/tmp/fdash_test_watch_tree\n") != NULL);
+    assert(strstr(content, "PathModified=/tmp/fdash_test_watch_tree/src\n") != NULL);
+    assert(strstr(content, "PathModified=/tmp/fdash_test_watch_tree/pkg\n") != NULL);
+    assert(strstr(content, "PathModified=/tmp/fdash_test_watch_tree/pkg/sub\n") != NULL);
+
+    /* Clean up */
+    unlink(path_file);
+    char restart_file[MAX_PATH_LEN];
+    snprintf(restart_file, sizeof(restart_file), "%s/%s%s-restart.service", dir, FIRE_UNIT_PREFIX, app.name);
+    unlink(restart_file);
+    rmdir(nested);
+    rmdir(sub2);
+    rmdir(sub1);
+    rmdir(base);
+
+    printf("PASS\n");
+}
+
 int main(void) {
     printf("--- Running fire-dash Core Tests ---\n");
     test_is_valid_name();
@@ -232,6 +349,9 @@ int main(void) {
     test_unit_generator();
     test_system_scope_sandboxing();
     test_log_viewer_core();
+    test_format_mem();
+    test_marker_clear_and_copy();
+    test_recursive_watch();
     printf("All fire-dash tests passed successfully!\n");
     return 0;
 }

@@ -63,6 +63,7 @@ const char *log_viewer_level_name(LogViewerLevel level);
 void log_viewer_toggle_pause(LogViewer *lv);
 void log_viewer_add_marker(LogViewer *lv);
 void log_viewer_insert_marker_after(LogViewer *lv, int real_line_idx);
+int log_viewer_clear_markers(LogViewer *lv);
 
 /* Scroll navigation */
 void log_viewer_scroll_up(LogViewer *lv, int delta);
