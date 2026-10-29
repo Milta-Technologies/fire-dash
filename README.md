@@ -25,7 +25,7 @@
 Running `fdash` without arguments (or typing `fdash monit`) opens the split-pane dashboard:
 
 ```text
-🔥 fdash v1.0.0  │  Scope: USER (~/.config)  │  Online: 3/3  │  RAM: 142.4 MB          00:15:32
+🔥 fdash v1.1.0  │  Scope: USER (~/.config)  │  Online: 3/3  │  RAM: 142.4 MB          00:15:32
 ───────────────────────────────────────────────────────────────────────────────────────────────────
   ID   NAME               STATUS       PID      MEMORY     RESTARTS WATCH       
   ──── ────────────────── ──────────── ──────── ────────── ──────── ────────────
@@ -33,7 +33,7 @@ Running `fdash` without arguments (or typing `fdash monit`) opens the split-pane
   1    worker-queue       ● active     14219    68.5 MB    1        -           
   2    metrics-agent      ● active     14234    25.7 MB    0        ✓ active    
 ───────────────────────────────────────────────────────────────────────────────────────────────────
- [↑/↓/j/k] Select  [s] Start  [x] Stop  [r] Restart  [d] Delete  [/] Search  [q] Quit
+ [↑/↓/j/k] Select  [s] Start  [x] Stop  [r] Restart  [d] Delete  [/] Search  [U] Upgrade  [q] Quit
 ╭─ Logs: api-service (100 lines) [Filter: ""] [auto-scroll: ON] ───────────────────────────────────╮
   2026-09-25T00:14:22+0000 server [14208]: [INFO] Database connection established
   2026-09-25T00:14:23+0000 server [14208]: [INFO] HTTP server listening on port 3000
@@ -64,27 +64,28 @@ Running `fdash` without arguments (or typing `fdash monit`) opens the split-pane
 - `x`: Stop selected application (or all applications if `[ALL APPS]` is selected)
 - `r`: Restart selected application (or all applications if `[ALL APPS]` is selected)
 - `d`: Delete service unit with interactive safety confirmation prompt `[y/n/Esc]` (when process table is focused)
+- `U`: **Self-Update / Upgrade** to latest release with interactive confirmation `[y/n/Esc]`
 - `Esc`: Unselect log line, close Inspector, exit fullscreen, or clear search filter
 - `q` or `Ctrl+C`: Exit dashboard cleanly (kills & reaps streaming background processes)
 
 ---
 
-## 🚀 Installation & Building
+## 🚀 Installation
 
-### Requirements
-- Linux with `systemd` (`systemctl` & `journalctl`)
-- Standard C compiler (`gcc` or `clang`) and `make`
-- Optional: `libsystemd-dev` for native D-Bus integration (auto-detected; falls back cleanly to direct systemctl interface if absent)
+### 1. One-Line Install (Recommended)
+Automatically detects your OS (Linux/macOS) and architecture (`amd64`/`arm64`), downloads the latest release, installs `fdash` to `/usr/local/bin`, and creates the `fire-dash` alias:
+```bash
+curl -fsSL https://raw.githubusercontent.com/Milta-Technologies/fire-dash/main/install.sh | bash
+```
 
-### Quick Build
+### 2. Build from Source
 ```bash
 git clone https://github.com/Milta-Technologies/fire-dash.git
 cd fire-dash
 make
 sudo make install
 ```
-
-This installs **`fdash`** (and symlinks `fire-dash` alias) to `/usr/local/bin/`.
+Requirements: Standard C compiler (`gcc` or `clang`), `make`, and `systemd`. Optional: `libsystemd-dev` for native D-Bus integration (auto-detected; falls back cleanly to direct systemctl interface if absent).
 
 ---
 
@@ -169,6 +170,17 @@ fdash logs -n 100
 fdash save
 ```
 Enables all currently registered `fire-*` units with systemd so they boot automatically on system restart.
+
+### 6. In-App Updates & Upgrades
+```bash
+# Check for updates and self-update the binary in-place
+fdash update
+fdash upgrade
+
+# Pin or install an explicit version
+fdash update 1.1.0
+```
+When running the interactive TUI dashboard, `fdash` automatically checks for new releases in the background (cached for 6 hours with zero startup delay). If a newer version is published, a golden `✨ vX.X.X AVAILABLE [U]` badge appears in the header. Pressing `U` brings up an interactive confirmation prompt `[y/n/Esc]` to upgrade and restart immediately!
 
 ---
 

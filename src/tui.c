@@ -2,6 +2,7 @@
 #include "dbus_systemd.h"
 #include "unit_gen.h"
 #include "cJSON.h"
+#include "updater.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -483,13 +484,18 @@ static void render_dashboard(TUIState *state, ProcessInfo *apps, int app_count) 
     if (state->fullscreen_logs) {
         /* FULLSCREEN LOGS VIEW */
         sb_printf(&sb, "\033[38;5;208;1m🔥 fdash\033[0m \033[38;5;244mv%s\033[0m", FIRE_VERSION);
+        int badge_len = 0;
+        if (state->has_update) {
+            sb_printf(&sb, " \033[48;5;220;38;5;16;1m ✨ v%s AVAILABLE [U] \033[0m", state->update_version);
+            badge_len = 20 + (int)strlen(state->update_version);
+        }
         sb_printf(&sb, "  \033[38;5;240m│\033[0m  Scope: \033[38;5;51;1m%s\033[0m",
                   state->scope == SCOPE_SYSTEM ? "SYSTEM" : "USER");
         sb_printf(&sb, "  \033[38;5;240m│\033[0m  Online: \033[38;5;48;1m%d/%d\033[0m", running_count, app_count);
         sb_printf(&sb, "  \033[38;5;240m│\033[0m  RAM: \033[38;5;220;1m%s\033[0m", total_mem_str);
         sb_printf(&sb, "  \033[38;5;240m│\033[0m  \033[48;5;236;38;5;226;1m 🖥 FULLSCREEN LOGS \033[0m");
 
-        int cur_len = 58 + (int)strlen(total_mem_str);
+        int cur_len = 58 + (int)strlen(total_mem_str) + badge_len;
         int pad = cols - cur_len - (int)strlen(time_str);
         if (pad > 0) {
             for (int i = 0; i < pad; i++) sb_append(&sb, " ", 1);
@@ -501,18 +507,23 @@ static void render_dashboard(TUIState *state, ProcessInfo *apps, int app_count) 
             if (lv->lines[matching_indices[k]].is_marker) marker_count++;
         }
 
-        if (state->status_msg[0] && (time(NULL) - state->status_msg_time < 4)) {
+        if (state->confirm_delete) {
+            sb_printf(&sb, " \033[48;5;196;38;5;231;1m ⚠ CONFIRM DELETE \033[0m \033[38;5;196;1mDelete service '%s'?\033[0m \033[38;5;220;1m[y] Confirm  [n/Esc] Cancel\033[0m\033[K\r\n", state->confirm_delete_name);
+        } else if (state->confirm_update) {
+            sb_printf(&sb, " \033[48;5;220;38;5;16;1m 🚀 UPGRADE FDASH \033[0m \033[38;5;220;1mUpgrade to v%s now?\033[0m \033[38;5;48;1m[y] Confirm\033[0m  \033[38;5;244m[n/Esc] Cancel\033[0m\033[K\r\n", state->update_version);
+        } else if (state->status_msg[0] && (time(NULL) - state->status_msg_time < 4)) {
             sb_printf(&sb, " \033[38;5;226;1m⚡ %s\033[0m\033[K\r\n", state->status_msg);
         } else if (state->selected_log_idx >= 0) {
             sb_printf(&sb, " \033[38;5;220;1m[Line #%d Selected]\033[0m \033[38;5;244m[Enter/o] Details  [m] Mark Below  [c] %s  [Esc] Unselect  [↑/↓] Navigate\033[0m\033[K\r\n",
                       state->selected_log_idx + 1, marker_count > 0 ? "Copy Marked" : "Copy Line");
         } else {
+            const char *upg_hint = state->has_update ? "  \033[38;5;220;1m[U] Upgrade\033[0m" : "";
             if (marker_count > 0) {
-                sb_printf(&sb, "\033[38;5;244m [↑/↓/j/k] Select Log  \033[38;5;51;1m[c] Copy Marked (%d)\033[0m\033[38;5;244m  [M] Clear  [f/Esc] Split  [l] Level: %-8s  [Space] Pause  [m] Mark  [q] Quit\033[0m\033[K\r\n",
-                          marker_count, log_viewer_level_name(state->log_viewer.level_filter));
+                sb_printf(&sb, "\033[38;5;244m [↑/↓/j/k] Select Log  \033[38;5;51;1m[c] Copy Marked (%d)\033[0m\033[38;5;244m  [M] Clear  [f/Esc] Split  [l] Level: %-8s  [Space] Pause  [m] Mark%s  [q] Quit\033[0m\033[K\r\n",
+                          marker_count, log_viewer_level_name(state->log_viewer.level_filter), upg_hint);
             } else {
-                sb_printf(&sb, "\033[38;5;244m [↑/↓/j/k] Select Log  [f/Esc] Split View  [l] Level: %-8s  [Space] Pause  [m] Mark  [/] Search  [q] Quit\033[0m\033[K\r\n",
-                          log_viewer_level_name(state->log_viewer.level_filter));
+                sb_printf(&sb, "\033[38;5;244m [↑/↓/j/k] Select Log  [f/Esc] Split View  [l] Level: %-8s  [Space] Pause  [m] Mark  [/] Search%s  [q] Quit\033[0m\033[K\r\n",
+                          log_viewer_level_name(state->log_viewer.level_filter), upg_hint);
             }
         }
 
@@ -521,12 +532,17 @@ static void render_dashboard(TUIState *state, ProcessInfo *apps, int app_count) 
     } else {
         /* 50/50 SPLIT DASHBOARD VIEW */
         sb_printf(&sb, "\033[38;5;208;1m🔥 fdash\033[0m \033[38;5;244mv%s\033[0m", FIRE_VERSION);
+        int badge_len = 0;
+        if (state->has_update) {
+            sb_printf(&sb, " \033[48;5;220;38;5;16;1m ✨ v%s AVAILABLE [U] \033[0m", state->update_version);
+            badge_len = 20 + (int)strlen(state->update_version);
+        }
         sb_printf(&sb, "  \033[38;5;240m│\033[0m  Scope: \033[38;5;51;1m%s\033[0m",
                   state->scope == SCOPE_SYSTEM ? "SYSTEM (/etc)" : "USER (~/.config)");
         sb_printf(&sb, "  \033[38;5;240m│\033[0m  Online: \033[38;5;48;1m%d/%d\033[0m", running_count, app_count);
         sb_printf(&sb, "  \033[38;5;240m│\033[0m  RAM: \033[38;5;220;1m%s\033[0m", total_mem_str);
 
-        int header_text_len = 55 + (int)strlen(total_mem_str);
+        int header_text_len = 55 + (int)strlen(total_mem_str) + badge_len;
         int pad = cols - header_text_len - (int)strlen(time_str);
         if (pad > 0) {
             for (int i = 0; i < pad; i++) sb_append(&sb, " ", 1);
@@ -636,6 +652,8 @@ static void render_dashboard(TUIState *state, ProcessInfo *apps, int app_count) 
 
         if (state->confirm_delete) {
             sb_printf(&sb, " \033[48;5;196;38;5;231;1m ⚠ CONFIRM DELETE \033[0m \033[38;5;196;1mDelete service '%s'?\033[0m \033[38;5;220;1m[y] Confirm  [n/Esc] Cancel\033[0m\033[K\r\n", state->confirm_delete_name);
+        } else if (state->confirm_update) {
+            sb_printf(&sb, " \033[48;5;220;38;5;16;1m 🚀 UPGRADE FDASH \033[0m \033[38;5;220;1mUpgrade to v%s now?\033[0m \033[38;5;48;1m[y] Confirm\033[0m  \033[38;5;244m[n/Esc] Cancel\033[0m\033[K\r\n", state->update_version);
         } else if (state->status_msg[0] && (time(NULL) - state->status_msg_time < 4)) {
             sb_printf(&sb, " \033[38;5;226;1m⚡ %s\033[0m\033[K\r\n", state->status_msg);
         } else if (state->selected_log_idx >= 0) {
@@ -645,10 +663,11 @@ static void render_dashboard(TUIState *state, ProcessInfo *apps, int app_count) 
             const char *focus_hint = (state->focus == FOCUS_LOGS)
                                      ? "\033[38;5;214;1m[Tab] Focus: LOGS (↑/↓/j/k navigate)\033[0m"
                                      : "\033[38;5;48;1m[Tab] Focus: APPS (↑/↓/j/k select)\033[0m";
+            const char *upg_hint = state->has_update ? "  \033[38;5;220;1m[U] Upgrade\033[0m" : "";
             if (marker_count > 0) {
-                sb_printf(&sb, " %s  \033[38;5;244m\033[38;5;51;1m[c] Copy Marked (%d)\033[0m\033[38;5;244m  [M] Clear  [m] Mark  [Space] Pause  [a] All  [f] Full  [q] Quit\033[0m\033[K\r\n", focus_hint, marker_count);
+                sb_printf(&sb, " %s  \033[38;5;244m\033[38;5;51;1m[c] Copy Marked (%d)\033[0m\033[38;5;244m  [M] Clear  [m] Mark  [Space] Pause  [a] All  [f] Full%s  [q] Quit\033[0m\033[K\r\n", focus_hint, marker_count, upg_hint);
             } else {
-                sb_printf(&sb, " %s  \033[38;5;244m[a] All-Apps  [f/Enter] Fullscreen  [l] Level  [/] Search  [Space] Pause  [m] Mark  [q] Quit\033[0m\033[K\r\n", focus_hint);
+                sb_printf(&sb, " %s  \033[38;5;244m[a] All-Apps  [f/Enter] Fullscreen  [l] Level  [/] Search  [Space] Pause  [m] Mark%s  [q] Quit\033[0m\033[K\r\n", focus_hint, upg_hint);
             }
         }
 
@@ -773,6 +792,9 @@ int tui_run(SystemdScope scope) {
     enable_raw_mode();
     update_window_size(&state);
 
+    /* Check for background update check (cached for 6 hrs) */
+    updater_check_version(state.update_version, sizeof(state.update_version), &state.has_update, false);
+
     ProcessInfo *apps = NULL;
     int app_count = 0;
 
@@ -846,7 +868,39 @@ int tui_run(SystemdScope scope) {
                 int *matching_indices = state.matching_indices;
                 int match_count = state.match_count;
 
-                /* 0. If Delete Confirmation is active */
+                /* 0a. If Update Confirmation is active */
+                if (state.confirm_update) {
+                    if (c == 'y' || c == 'Y') {
+                        state.confirm_update = false;
+                        disable_raw_mode();
+                        printf("\033[2J\033[H\033[?25h");
+                        printf("🔥 Upgrading fdash to v%s...\n", state.update_version);
+                        fflush(stdout);
+
+                        int res = updater_self_update(state.update_version);
+                        if (res == 0) {
+                            printf("\n✔ Update to v%s completed successfully! Restarting fdash...\n", state.update_version);
+                            sleep(1);
+                            char self_path[PATH_MAX];
+                            if (updater_get_self_path(self_path, sizeof(self_path)) == 0) {
+                                execl(self_path, self_path, (char *)NULL);
+                            }
+                            exit(0);
+                        } else {
+                            printf("\n❌ Update failed. Press Enter to return to dashboard...");
+                            char tmp[16];
+                            if (fgets(tmp, sizeof(tmp), stdin)) {}
+                            enable_raw_mode();
+                            set_status(&state, "Update to v%s failed", state.update_version);
+                        }
+                    } else if (c == 'n' || c == 'N' || c == 27 || c == 'q' || c == 'Q') {
+                        state.confirm_update = false;
+                        set_status(&state, "Cancelled upgrade");
+                    }
+                    continue;
+                }
+
+                /* 0b. If Delete Confirmation is active */
                 if (state.confirm_delete) {
                     if (c == 'y' || c == 'Y') {
                         state.confirm_delete = false;
@@ -1159,6 +1213,24 @@ int tui_run(SystemdScope scope) {
                 } else if (c == 'u') {
                     if (is_log_mode) {
                         log_viewer_scroll_up(&state.log_viewer, 5);
+                    } else if (state.has_update) {
+                        state.confirm_update = true;
+                        set_status(&state, "🚀 Upgrade to v%s? Press [y] to confirm, [n/Esc] to cancel", state.update_version);
+                    }
+                } else if (c == 'U') {
+                    if (state.has_update) {
+                        state.confirm_update = true;
+                        set_status(&state, "🚀 Upgrade to v%s? Press [y] to confirm, [n/Esc] to cancel", state.update_version);
+                    } else {
+                        set_status(&state, "Checking for updates...");
+                        render_dashboard(&state, apps, app_count);
+                        updater_check_version(state.update_version, sizeof(state.update_version), &state.has_update, true);
+                        if (state.has_update) {
+                            state.confirm_update = true;
+                            set_status(&state, "✨ New version v%s available! Press [y] to confirm upgrade", state.update_version);
+                        } else {
+                            set_status(&state, "✔ Already on the latest version (v%s)", FIRE_VERSION);
+                        }
                     }
                 } else if (c == 'n') {
                     if (is_log_mode) {

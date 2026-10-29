@@ -30,6 +30,9 @@ typedef struct {
     bool should_quit;
     bool confirm_delete;
     char confirm_delete_name[MAX_NAME_LEN];
+    bool has_update;
+    char update_version[32];
+    bool confirm_update;
 } TUIState;
 
 /* Starts the interactive TUI event loop */

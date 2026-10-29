@@ -2,6 +2,7 @@
 #include "config.h"
 #include "unit_gen.h"
 #include "log_viewer.h"
+#include "updater.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -342,6 +343,30 @@ static void test_recursive_watch(void) {
     printf("PASS\n");
 }
 
+static void test_updater(void) {
+    printf("[TEST] Testing updater semver comparisons and platform detection... ");
+    assert(updater_is_newer("1.1.0", "1.0.0") == true);
+    assert(updater_is_newer("v1.1.0", "1.0.0") == true);
+    assert(updater_is_newer("1.0.1", "1.0.0") == true);
+    assert(updater_is_newer("2.0.0", "1.9.9") == true);
+    assert(updater_is_newer("1.0.0", "1.0.0") == false);
+    assert(updater_is_newer("1.0.0", "1.1.0") == false);
+    assert(updater_is_newer("0.9.9", "1.0.0") == false);
+
+    char os[32] = {0};
+    char arch[32] = {0};
+    updater_get_platform(os, sizeof(os), arch, sizeof(arch));
+    assert(strlen(os) > 0);
+    assert(strlen(arch) > 0);
+
+    char self_path[PATH_MAX] = {0};
+    int res = updater_get_self_path(self_path, sizeof(self_path));
+    assert(res == 0);
+    assert(strlen(self_path) > 0);
+
+    printf("PASS\n");
+}
+
 int main(void) {
     printf("--- Running fire-dash Core Tests ---\n");
     test_is_valid_name();
@@ -352,6 +377,7 @@ int main(void) {
     test_format_mem();
     test_marker_clear_and_copy();
     test_recursive_watch();
+    test_updater();
     printf("All fire-dash tests passed successfully!\n");
     return 0;
 }

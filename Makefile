@@ -14,6 +14,7 @@ SRC = src/cJSON.c \
       src/unit_gen.c \
       src/dbus_systemd.c \
       src/log_viewer.c \
+      src/updater.c \
       src/tui.c \
       src/main.c
 
@@ -36,7 +37,7 @@ $(TARGET): $(OBJ)
 test: $(TEST_TARGET)
 	@./$(TEST_TARGET)
 
-$(TEST_TARGET): tests/test_core.o src/cJSON.o src/config.o src/unit_gen.o src/log_viewer.o
+$(TEST_TARGET): tests/test_core.o src/cJSON.o src/config.o src/unit_gen.o src/log_viewer.o src/updater.o
 	@mkdir -p bin
 	$(CC) $^ -o $@ $(LDFLAGS)
 

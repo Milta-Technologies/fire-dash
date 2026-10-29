@@ -2,6 +2,7 @@
 #include "unit_gen.h"
 #include "dbus_systemd.h"
 #include "config.h"
+#include "updater.h"
 #include "tui.h"
 #include <stdio.h>
 #include <stdlib.h>
@@ -27,6 +28,7 @@ static void print_usage(const char *prog) {
     printf("  \033[38;5;51mlist\033[0m, \033[38;5;51mls\033[0m                 Print formatted status table and exit\n");
     printf("  \033[38;5;51mlogs\033[0m [name] [-f] [-n num]  Tail or view journal logs for an app\n");
     printf("  \033[38;5;51msave\033[0m                      Enable all units to auto-start on boot\n");
+    printf("  \033[38;5;51mupdate\033[0m, \033[38;5;51mupgrade\033[0m [ver]      Check for updates and self-update fdash binary\n");
     printf("  \033[38;5;51mhelp\033[0m                      Show this help message\n\n");
     printf("\033[1mSTART OPTIONS:\033[0m\n");
     printf("  \033[38;5;214m--name, -n <name>\033[0m         Custom name for the process\n");
@@ -495,6 +497,11 @@ static int cmd_logs(int argc, char **argv, SystemdScope scope) {
     return WIFEXITED(wait_status) ? WEXITSTATUS(wait_status) : 1;
 }
 
+static int cmd_update(int argc, char **argv) {
+    const char *ver = (argc > 0 && argv[0] && argv[0][0]) ? argv[0] : NULL;
+    return updater_self_update(ver);
+}
+
 int main(int argc, char **argv) {
     SystemdScope scope = SCOPE_USER;
 
@@ -507,6 +514,8 @@ int main(int argc, char **argv) {
         } else if (strcmp(argv[i], "-v") == 0 || strcmp(argv[i], "--version") == 0) {
             printf("fdash version %s\n", FIRE_VERSION);
             return 0;
+        } else if (strcmp(argv[i], "--update") == 0) {
+            return cmd_update(0, NULL);
         } else if (strcmp(argv[i], "-h") == 0 || strcmp(argv[i], "--help") == 0 || strcmp(argv[i], "help") == 0) {
             print_usage(argv[0]);
             return 0;
@@ -554,6 +563,8 @@ int main(int argc, char **argv) {
         res = cmd_logs(filtered_count - 1, &filtered_args[1], scope);
     } else if (strcmp(subcmd, "save") == 0) {
         res = cmd_save(scope);
+    } else if (strcmp(subcmd, "update") == 0 || strcmp(subcmd, "upgrade") == 0) {
+        res = cmd_update(filtered_count - 1, &filtered_args[1]);
     } else {
         fprintf(stderr, "\033[31;1mUnknown command:\033[0m '%s'\n\n", subcmd);
         print_usage(argv[0]);
