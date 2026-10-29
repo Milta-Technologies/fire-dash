@@ -5,7 +5,7 @@ LDFLAGS ?=
 # Check for pkg-config and libsystemd
 HAS_LIBSYSTEMD := $(shell pkg-config --exists libsystemd 2>/dev/null && echo 1 || echo 0)
 ifeq ($(HAS_LIBSYSTEMD), 1)
-    CFLAGS += -DHAVE_LIBSYSTEMD=1 $(shell pkg-config --cflags libsystemd)
+    CFLAGS += -DHAVE_LIBSYSTEMD=1 $(subst -I,-isystem ,$(shell pkg-config --cflags libsystemd))
     LDFLAGS += $(shell pkg-config --libs libsystemd)
 endif
 
