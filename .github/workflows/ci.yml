@@ -27,7 +27,14 @@ jobs:
       - name: Build with ${{ matrix.compiler }}
         run: |
           make clean
-          make CC="${{ matrix.compiler }}"
+          if ! make CC="${{ matrix.compiler }}"; then
+            echo "::error::Build failed with ${{ matrix.compiler }}"
+            for f in src/*.c; do
+              echo "--- Compiling $f with ${{ matrix.compiler }} ---"
+              ${{ matrix.compiler }} -Wall -Wextra -std=c99 -pedantic -D_GNU_SOURCE -Iinclude -O2 -c "$f" || true
+            done
+            exit 1
+          fi
 
       - name: Run test suite
         run: |
