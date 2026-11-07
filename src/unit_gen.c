@@ -146,7 +146,30 @@ int unit_gen_create_service(const AppService *app, char *err_buf, size_t err_len
     if (app->cwd[0]) {
         fprintf(fp, "WorkingDirectory=%s\n", app->cwd);
     }
-    fprintf(fp, "ExecStart=%s\n", app->script);
+
+    /* Wrap commands with shell syntax (compound operators, pipes, redirects, source, etc.) in /bin/bash -c */
+    bool has_shell = false;
+    const char *shell_metachars = ";|&><`$*~()";
+    if (strpbrk(app->script, shell_metachars) != NULL ||
+        strncmp(app->script, "source ", 7) == 0 ||
+        strncmp(app->script, "[ ", 2) == 0) {
+        has_shell = true;
+    }
+
+    if (has_shell && strncmp(app->script, "/bin/bash", 9) != 0 && strncmp(app->script, "/bin/sh", 7) != 0) {
+        char escaped[MAX_CMD_LEN * 2];
+        size_t e_idx = 0;
+        for (const char *s = app->script; *s && e_idx + 2 < sizeof(escaped); s++) {
+            if (*s == '"' || *s == '\\') {
+                escaped[e_idx++] = '\\';
+            }
+            escaped[e_idx++] = *s;
+        }
+        escaped[e_idx] = '\0';
+        fprintf(fp, "ExecStart=/bin/bash -c \"%s\"\n", escaped);
+    } else {
+        fprintf(fp, "ExecStart=%s\n", app->script);
+    }
     fprintf(fp, "Restart=always\n");
     fprintf(fp, "RestartSec=%d\n", app->restart_sec > 0 ? app->restart_sec : 2);
     fprintf(fp, "StandardOutput=journal\n");
@@ -370,6 +393,11 @@ int unit_gen_list_names(SystemdScope scope, char ***out_names, int *out_count) {
         if (len > prefix_len + 8 &&
             strncmp(entry->d_name, FIRE_UNIT_PREFIX, prefix_len) == 0 &&
             strcmp(entry->d_name + len - 8, ".service") == 0) {
+
+            /* Ignore companion restart units created for watch triggers (e.g. fire-<name>-restart.service) */
+            if (len >= prefix_len + 16 && strcmp(entry->d_name + len - 16, "-restart.service") == 0) {
+                continue;
+            }
 
             size_t name_len = len - prefix_len - 8;
             char name_buf[MAX_NAME_LEN];
